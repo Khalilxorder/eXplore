@@ -447,6 +447,25 @@ export async function fetchIntelligenceMultipliers() {
   return apiFetch('/api/v1/intelligence/multipliers');
 }
 
+export async function runPersonalIntelligenceCycle(options = {}) {
+  return apiFetch('/api/v1/intelligence/cycle/run', {
+    method: 'POST',
+    body: JSON.stringify({
+      runExternal: options.runExternal !== false,
+      force: Boolean(options.force),
+      limit: options.limit || 12,
+    }),
+  });
+}
+
+export async function fetchIntelligenceCycleStatus() {
+  return apiFetch('/api/v1/intelligence/cycle/status');
+}
+
+export async function bootstrapIntelligenceCycle() {
+  return apiFetch('/api/v1/intelligence/cycle/bootstrap', { method: 'POST' });
+}
+
 export async function fetchTopics() {
   return apiFetch('/api/v1/topics');
 }

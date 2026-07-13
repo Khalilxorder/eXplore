@@ -429,7 +429,10 @@ function recordInteraction(db, userId, contentId, action) {
   const tags = safeParseJson(item.topic_tags_json, []);
   const armKey = tags[0] || item.channel_type || 'general';
 
-  const isPositive = ['click', 'save', 'share', 'open_source', 'valuable', 'rate_high'].includes(action) ||
+  const isPositive = [
+    'click', 'save', 'share', 'open_source', 'valuable', 'rate_high',
+    'like', 'more_like', 'more-like',
+  ].includes(action) ||
     (typeof action === 'string' && action.startsWith('rate:') && Number(action.split(':')[1]) >= 7);
   const reward = isPositive ? 1.0 : 0.0;
 

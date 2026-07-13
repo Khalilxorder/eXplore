@@ -39,6 +39,8 @@ import {
   exportUserTheory,
   fetchIntelligenceCorrections,
   fetchIntelligenceMultipliers,
+  runPersonalIntelligenceCycle,
+  fetchIntelligenceCycleStatus,
   addInterest,
   updateInterestWeight,
   addGoal,
@@ -570,6 +572,9 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
   const [theoryMessage, setTheoryMessage] = useState('');
   const [theoryCorrections, setTheoryCorrections] = useState([]);
   const [theoryMultipliers, setTheoryMultipliers] = useState([]);
+  const [cycleStatus, setCycleStatus] = useState(null);
+  const [cycleBusy, setCycleBusy] = useState(false);
+  const [cycleMessage, setCycleMessage] = useState('');
 
   // ── Three-Tier Notification Rules State & Handlers ──────────────────
   const [threeTierRules, setThreeTierRules] = useState([]);
@@ -2852,7 +2857,46 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
               >
                 Export JSON
               </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={cycleBusy}
+                onClick={async () => {
+                  setCycleBusy(true);
+                  setCycleMessage('Running full intelligence cycle...');
+                  try {
+                    const snapshot = await runPersonalIntelligenceCycle({ runExternal: true, limit: 12 });
+                    const status = await fetchIntelligenceCycleStatus();
+                    setCycleStatus(status);
+                    if (snapshot?.theory) {
+                      setUserTheory((current) => current ? { ...current, status: snapshot.theory.status } : current);
+                    }
+                    setCycleMessage(
+                      snapshot?.success
+                        ? `Cycle complete: ${snapshot.ranking?.itemCount || 0} ranked items, ${snapshot.clustering?.clusterCount || 0} clusters, theory ${snapshot.theory?.status || 'active'}.`
+                        : 'Cycle finished with issues.'
+                    );
+                    // Refresh theory evidence counts
+                    const theoryRes = await fetchUserTheory();
+                    if (theoryRes?.theory) setUserTheory(theoryRes.theory);
+                  } catch (error) {
+                    setCycleMessage(error?.message || 'Cycle failed. Backend may be offline.');
+                  } finally {
+                    setCycleBusy(false);
+                  }
+                }}
+              >
+                {cycleBusy ? 'Running cycle…' : 'Run full intelligence cycle'}
+              </button>
             </div>
+            {cycleMessage ? (
+              <p style={{ margin: 0, font: 'var(--font-caption)', color: 'var(--text-secondary)' }}>{cycleMessage}</p>
+            ) : null}
+            {cycleStatus ? (
+              <p style={{ margin: 0, font: 'var(--font-caption)', color: 'var(--text-secondary)' }}>
+                Cycle ready: {String(cycleStatus.ready)} · content {cycleStatus.contentCount} · topics {cycleStatus.topicCount} · evidence {cycleStatus.evidenceCount}
+              </p>
+            ) : null}
             {theoryMessage ? (
               <p style={{ margin: 0, font: 'var(--font-caption)', color: 'var(--text-secondary)' }}>{theoryMessage}</p>
             ) : null}

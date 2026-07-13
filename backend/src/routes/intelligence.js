@@ -5,6 +5,7 @@ const recommenderCore = require('../services/recommenderCore');
 const valueHierarchySync = require('../services/valueHierarchySync');
 const intelligenceContract = require('../services/intelligenceContract');
 const eventClusteringService = require('../services/eventClusteringService');
+const personalIntelligenceCycle = require('../services/personalIntelligenceCycle');
 const {
   requireAdminAccess,
   telemetryAuthRequired,
@@ -143,17 +144,18 @@ module.exports = async function intelligenceRoutes(fastify, opts) {
           ? undefined
           : Math.max(1, Math.min(10, parsedRating));
         recommenderCore.saveFeedFeedback(db, userId, content_item_id, normalizedRating, feedback_type || 'valuable', written_correction);
-        db.prepare(`
-          INSERT INTO user_theory_evidence (id, user_id, evidence_type, subject, evidence_json, confidence)
-          VALUES (?, ?, 'explicit_feedback', ?, ?, ?)
-        `).run(
-          crypto.randomUUID(),
-          userId,
-          content_item_id || 'unknown-content',
-          JSON.stringify({ rating: normalizedRating, feedback_type: feedback_type || 'valuable', written_correction: written_correction || '' }),
-          normalizedRating === undefined ? 0.6 : 0.8,
-        );
-        return { success: true, message: 'Rating/correction feedback saved successfully' };
+        const theoryUpdate = personalIntelligenceCycle.applyFeedbackToTheory(db, userId, {
+          contentItemId: content_item_id,
+          feedbackType: feedback_type || 'valuable',
+          rating: normalizedRating,
+          writtenCorrection: written_correction || '',
+        });
+        return {
+          success: true,
+          message: 'Rating/correction feedback saved successfully',
+          theoryUpdate,
+          cycleHint: 'Run POST /api/v1/intelligence/cycle/run to refresh ranked explanations after feedback.',
+        };
       } catch (err) {
         request.log.error(err);
         return reply.status(500).send({ success: false, error: 'Database Error', details: err.message });
@@ -294,6 +296,12 @@ module.exports = async function intelligenceRoutes(fastify, opts) {
         }
       }
 
+      const theoryUpdate = personalIntelligenceCycle.applyFeedbackToTheory(db, userId, {
+        contentItemId: content_item_id,
+        action: normAction,
+        reason: normReason,
+      });
+
       return {
         success: true,
         profile: {
@@ -302,7 +310,9 @@ module.exports = async function intelligenceRoutes(fastify, opts) {
           length_pref,
           topics_avoid: avoidTopics,
           topics_focus: focusTopics
-        }
+        },
+        theoryUpdate,
+        cycleHint: 'Run POST /api/v1/intelligence/cycle/run to refresh ranked explanations after feedback.',
       };
     } catch (err) {
       request.log.error(err);
@@ -841,6 +851,41 @@ module.exports = async function intelligenceRoutes(fastify, opts) {
       request.log.error(err);
       return reply.status(500).send({ success: false, error: 'Database Error', details: err.message });
     }
+  });
+
+  // ----------------------------------------------------
+  // Closed personal intelligence cycle
+  // Theory → Topics/Sources → Content → Cluster → Rank → Explain → Feedback
+  // ----------------------------------------------------
+  fastify.get('/api/v1/intelligence/cycle/status', async (request) => {
+    const userId = resolveUserId(request);
+    ensureUserProfile(db, userId);
+    return personalIntelligenceCycle.getCycleStatus(db, userId);
+  });
+
+  fastify.post('/api/v1/intelligence/cycle/run', async (request, reply) => {
+    const userId = resolveUserId(request);
+    try {
+      ensureUserProfile(db, userId);
+      const body = request.body || {};
+      const snapshot = await personalIntelligenceCycle.runPersonalIntelligenceCycle(db, userId, {
+        runExternal: body.runExternal !== false && body.external !== false,
+        force: Boolean(body.force),
+        limit: Number(body.limit || 12),
+        loopMode: body.loopMode || 'personal-cycle',
+      });
+      return snapshot;
+    } catch (err) {
+      request.log.error(err);
+      return reply.status(500).send({ success: false, error: 'Cycle failed', details: err.message });
+    }
+  });
+
+  fastify.post('/api/v1/intelligence/cycle/bootstrap', async (request) => {
+    const userId = resolveUserId(request);
+    ensureUserProfile(db, userId);
+    const bootstrap = personalIntelligenceCycle.bootstrapPersonalCycle(db, userId);
+    return { success: true, bootstrap };
   });
 
   // Final event analysis scaffold (plan Part 8 + Jordan Part 9)
