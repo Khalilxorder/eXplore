@@ -1,0 +1,38 @@
+{
+  "name": "eXplore",
+  "short_name": "eXplore",
+  "description": "Reach what matters with a sharp-edged personal intelligence filter.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0D1117",
+  "theme_color": "#0A84FF",
+  "orientation": "portrait",
+  "categories": ["news", "productivity"],
+  "lang": "en",
+  "dir": "ltr",
+  "id": "/",
+  "scope": "/",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "Latest news",
+      "url": "/",
+      "description": "Open the latest signal feed"
+    }
+  ]
+}

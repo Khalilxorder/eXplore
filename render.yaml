@@ -1,0 +1,106 @@
+services:
+  - type: web
+    runtime: static
+    name: explore-web
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./out
+    envVars:
+      - fromGroup: explore-frontend-public
+
+  - type: web
+    runtime: docker
+    name: explore-api
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/v1/health
+    envVars:
+      - fromGroup: explore-backend-shared
+
+  - type: worker
+    runtime: docker
+    name: explore-alerts
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: node pushWorker.js --loop
+    envVars:
+      - fromGroup: explore-backend-shared
+
+  - type: worker
+    runtime: docker
+    name: explore-discovery
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: node discoveryWorker.js
+    envVars:
+      - fromGroup: explore-backend-shared
+
+envVarGroups:
+  - name: explore-frontend-public
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+      - key: NEXT_PUBLIC_SITE_URL
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+        sync: false
+      - key: NEXT_PUBLIC_MOBILE_API_URL
+        sync: false
+      - key: NEXT_PUBLIC_MOBILE_APP_SCHEME
+        sync: false
+
+  - name: explore-backend-shared
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: DATA_BACKEND
+        value: postgres
+      - key: ALLOW_DEV_MOCKS
+        value: "false"
+      - key: AI_PROVIDER
+        value: auto
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-lite
+      - key: GEMINI_TEMPLATE_MODEL
+        value: gemini-2.5-flash-lite
+      - key: GEMINI_EMBEDDING_MODEL
+        value: gemini-embedding-001
+      - key: EMBED_ALERT_WORKER
+        value: "false"
+      - key: EMBED_DISCOVERY_WORKER
+        value: "false"
+      - key: BACKEND_PUBLIC_URL
+        sync: false
+      - key: POSTGRES_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_ACCESS_TOKEN
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_AI_API_KEY
+        sync: false
+      - key: GOOGLE_GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_AI_API_KEYS
+        sync: false

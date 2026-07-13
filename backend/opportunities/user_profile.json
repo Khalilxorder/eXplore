@@ -1,0 +1,78 @@
+{
+  "_readme": "Edit this file to change how ALL jobs are ranked. Save and re-run rank.py.",
+  "personal": {
+    "name": "Khalil Sabha",
+    "location": "Budapest",
+    "willing_to_commute_km": 30,
+    "languages": ["English", "Arabic", "Hungarian (basic)"],
+    "education": "Psychology student / BSc"
+  },
+  "skills": [
+    "Python", "AI tools", "ChatGPT", "prompt engineering",
+    "research", "writing", "content creation", "music production",
+    "audio engineering", "sound design", "video editing",
+    "Microsoft Office", "data entry", "customer service",
+    "English tutoring", "barista", "hospitality"
+  ],
+  "employment_preferences": {
+    "types": ["PART_TIME", "FULL_TIME", "FREELANCE", "TEMPORARY"],
+    "min_salary_huf_monthly": 150000,
+    "min_salary_huf_hourly": 1200,
+    "remote_ok": true,
+    "flexible_hours_required": true,
+    "note": "Flexible hours essential — primary mission is building SPHERE"
+  },
+  "vision": {
+    "project": "SPHERE",
+    "description": "Audio-visual-philosophical creative project combining music, AI, visuals and deep intellectual content",
+    "keywords": [
+      "AI", "artificial intelligence", "machine learning", "data",
+      "research", "assistant", "audio", "music", "sound", "creative",
+      "content", "writer", "writing", "English", "tutor", "teaching",
+      "psychology", "philosophy", "media", "video", "editing",
+      "remote", "freelance", "automation", "Python", "developer",
+      "analyst", "annotator", "transcription", "translation",
+      "social media", "podcast", "studio", "design", "UX",
+      "international", "NGO", "university", "academic", "innovation"
+    ],
+    "ideal_job": "AI-connected, creative, automatable, or leaves mental space for SPHERE. Einstein as patent clerk."
+  },
+  "filter_blacklist": {
+    "titles": [
+      "sofor", "sofőr", "driver", "targonca", "targoncas", "forklift",
+      "hegeszto", "hegesztő", "welder", "lakatos", "kovacs",
+      "villanyszerelo", "villanyszerelő", "electrician",
+      "komuves", "mason", "festo", "festő", "painter",
+      "gepkezelo", "machine operator",
+      "varronő", "seamstress", "meszaros", "butcher",
+      "szerelo", "mechanic", "autoszerelo",
+      "hev", "vasut", "railway", "palyamunka",
+      "mezogazdasag", "farming", "mining", "banyasz",
+      "epitoipari", "construction", "kamion", "hgv", "LKW"
+    ],
+    "companies": [],
+    "keywords_in_description": [
+      "B kategóriás jogosítvány",
+      "nehéz fizikai munka",
+      "éjszakai műszak kötelező"
+    ]
+  },
+  "scoring_weights": {
+    "vision_keyword_in_title": 25,
+    "vision_keyword_in_description": 12,
+    "skill_match": 15,
+    "remote_or_flexible": 12,
+    "budapest_location": 8,
+    "english_language": 10,
+    "salary_above_minimum": 8,
+    "fresh_posting_days_7": 6,
+    "part_time": 5,
+    "penalties": {
+      "requires_degree_not_held": -20,
+      "heavy_physical": -25,
+      "outside_budapest_not_remote": -10,
+      "old_posting_days_30": -5,
+      "hungarian_only_strict": -8
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "worker:alerts": "node pushWorker.js",
+    "worker:alerts:loop": "node pushWorker.js --loop",
+    "worker:discovery": "node discoveryWorker.js",
+    "scholarships:official": "powershell -ExecutionPolicy Bypass -File ../scripts/run-official-scholarship-refresh.ps1",
+    "scholarships:official:dry-run": "powershell -ExecutionPolicy Bypass -File ../scripts/run-official-scholarship-refresh.ps1 -DryRun",
+    "test": "node --test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/static": "^9.1.1",
+    "@google/genai": "^1.44.0",
+    "apify-client": "^2.22.2",
+    "better-sqlite3": "^12.11.1",
+    "bullmq": "^5.70.4",
+    "dotenv": "^17.3.1",
+    "fastify": "^5.8.5",
+    "googleapis": "^171.4.0",
+    "ioredis": "^5.10.0",
+    "openai": "^6.27.0",
+    "pg": "^8.20.0",
+    "puppeteer-core": "^24.43.1",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

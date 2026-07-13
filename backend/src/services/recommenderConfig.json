@@ -1,0 +1,34 @@
+{
+  "version": "1.0.0",
+  "weights": {
+    "semanticRelevance": 0.35,
+    "goalRelevance": 0.25,
+    "credibility": 0.15,
+    "difficulty": 0.10,
+    "freshness": 0.15
+  },
+  "penalties": {
+    "negativeInteraction": -0.20,
+    "clickbait": -0.15,
+    "distractionRisk": -0.25
+  },
+  "bandit": {
+    "activeModel": "thompson",
+    "explorationBudget": 0.15,
+    "linUcb": {
+      "alpha": 0.2
+    },
+    "thompsonSampling": {
+      "defaultAlpha": 1.0,
+      "defaultBeta": 1.0
+    }
+  },
+  "diversity": {
+    "mmr": {
+      "lambda": 0.7
+    },
+    "topicCapping": {
+      "maxItemsPerTopic": 3
+    }
+  }
+}

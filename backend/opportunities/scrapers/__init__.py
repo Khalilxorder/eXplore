@@ -1,0 +1,1 @@
+# Hungary Jobs Scraper Package

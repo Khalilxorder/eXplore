@@ -1,0 +1,128 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_API_URL: /api
+        NEXT_PUBLIC_SITE_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    environment:
+      PROXY_API_HOST: backend
+      PROXY_API_PORT: 8080
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      PORT: 8080
+      DATA_BACKEND: ${DATA_BACKEND:-postgres}
+      EMBED_ALERT_WORKER: "false"
+      EMBED_DISCOVERY_WORKER: "false"
+      POSTGRES_URL: ${POSTGRES_URL:-postgresql://explore:explore@postgres:5432/explore}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      BACKEND_PUBLIC_URL: ${BACKEND_PUBLIC_URL:-http://localhost:8080}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: node worker.js
+    env_file:
+      - ./backend/.env
+    environment:
+      DATA_BACKEND: ${DATA_BACKEND:-postgres}
+      POSTGRES_URL: ${POSTGRES_URL:-postgresql://explore:explore@postgres:5432/explore}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  push-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: node pushWorker.js --loop
+    env_file:
+      - ./backend/.env
+    environment:
+      DATA_BACKEND: ${DATA_BACKEND:-postgres}
+      POSTGRES_URL: ${POSTGRES_URL:-postgresql://explore:explore@postgres:5432/explore}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  discovery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: node discoveryWorker.js
+    env_file:
+      - ./backend/.env
+    environment:
+      DATA_BACKEND: ${DATA_BACKEND:-postgres}
+      POSTGRES_URL: ${POSTGRES_URL:-postgresql://explore:explore@postgres:5432/explore}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: explore
+      POSTGRES_PASSWORD: explore
+      POSTGRES_DB: explore
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U explore"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

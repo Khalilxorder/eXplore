@@ -1,0 +1,20 @@
+{
+  "appId": "xplore.com",
+  "appName": "eXplore",
+  "webDir": "out",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "backgroundColor": "#EEF2F6"
+  },
+  "plugins": {
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#EEF2F6"
+    },
+    "CapacitorUpdater": {
+      "autoUpdate": true
+    }
+  }
+}

@@ -1,0 +1,12 @@
+.gcloudignore
+.env
+node_modules
+logs
+uploads
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.out.log
+*.err.log
+npm-debug.log*

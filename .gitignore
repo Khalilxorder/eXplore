@@ -1,0 +1,78 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+**/node_modules/
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/test-results
+/playwright-report
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+/dist
+/releases
+*.apk
+*.aab
+
+# local data / runtime noise
+*.db
+*.db-shm
+*.db-wal
+backend/explore.db*
+backend/opportunities/*.db
+backend/logs/
+backend/uploads/
+logs/
+tmp/
+artifacts/
+.codex-run/
+.codex-remote-attachments/
+.agents/
+StudentApartment/
+android/app/build/
+android/build/
+android/.gradle/
+
+# misc
+.DS_Store
+*.pem
+
+# debug / verify noise
+npm-debug.log*
+yarn-debug.log*
+.pnpm-debug.log*
+.verify-*
+backend-install.log
+eslint_out.json
+
+# env files
+.env*
+android/app/google-services.json
+android/keystore.properties
+android/app/*.keystore
+android/app/*.jks
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+.env*.local
+
+supabase/.temp/
+

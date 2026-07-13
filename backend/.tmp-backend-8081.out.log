@@ -1,0 +1,17 @@
+[dotenv@17.3.1] injecting env (63) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+{"level":30,"time":1780196694482,"pid":18068,"hostname":"DESKTOP-KHEKLLU","msg":"Server listening at http://127.0.0.1:8081"}
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
+{"level":30,"time":1780196694483,"pid":18068,"hostname":"DESKTOP-KHEKLLU","msg":"Server listening at http://10.252.27.77:8081"}
+{"level":30,"time":1780196694483,"pid":18068,"hostname":"DESKTOP-KHEKLLU","msg":"Server listening at http://192.168.0.4:8081"}
+{"level":30,"time":1780196694483,"pid":18068,"hostname":"DESKTOP-KHEKLLU","msg":"eXplore backend listening on 0.0.0.0:8081"}
+{"level":30,"time":1780196694483,"pid":18068,"hostname":"DESKTOP-KHEKLLU","msg":"Starting embedded alert radar worker..."}
+{"level":30,"time":1780196694550,"pid":18068,"hostname":"DESKTOP-KHEKLLU","msg":"Starting embedded discovery worker..."}
+{"level":30,"time":1780196719059,"pid":18068,"hostname":"DESKTOP-KHEKLLU","reqId":"req-1","req":{"method":"GET","url":"/api/v1/health","host":"127.0.0.1:8081","remoteAddress":"127.0.0.1","remotePort":57309},"msg":"incoming request"}
+{"level":30,"time":1780196719101,"pid":18068,"hostname":"DESKTOP-KHEKLLU","reqId":"req-1","res":{"statusCode":200},"responseTime":40.694599997252226,"msg":"request completed"}
+{"level":30,"time":1780196719102,"pid":18068,"hostname":"DESKTOP-KHEKLLU","reqId":"req-2","req":{"method":"GET","url":"/api/v1/alerts/official-releases?limit=8","host":"127.0.0.1:8081","remoteAddress":"127.0.0.1","remotePort":57310},"msg":"incoming request"}
+{"level":30,"time":1780196719103,"pid":18068,"hostname":"DESKTOP-KHEKLLU","reqId":"req-2","res":{"statusCode":200},"responseTime":1.5863000005483627,"msg":"request completed"}
+{"level":30,"time":1780196720035,"pid":18068,"hostname":"DESKTOP-KHEKLLU","reqId":"req-3","req":{"method":"GET","url":"/api/v1/opportunities/coverage","host":"127.0.0.1:8081","remoteAddress":"127.0.0.1","remotePort":57314},"msg":"incoming request"}
+{"level":30,"time":1780196720723,"pid":18068,"hostname":"DESKTOP-KHEKLLU","reqId":"req-3","res":{"statusCode":200},"responseTime":687.2817999981344,"msg":"request completed"}
+{"level":30,"time":1780196749999,"pid":18068,"hostname":"DESKTOP-KHEKLLU","reqId":"req-4","req":{"method":"GET","url":"/api/v1/opportunities/scholarships/stats","host":"127.0.0.1:8081","remoteAddress":"127.0.0.1","remotePort":50872},"msg":"incoming request"}
+{"level":30,"time":1780196750202,"pid":18068,"hostname":"DESKTOP-KHEKLLU","reqId":"req-4","res":{"statusCode":200},"responseTime":201.96860000118613,"msg":"request completed"}

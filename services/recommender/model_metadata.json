@@ -1,0 +1,22 @@
+{
+    "active_model_a": "c:\\Users\\khali\\Desktop\\eXPLORE\\services\\recommender\\checkpoints\\model_a_active.pt",
+    "active_model_b": "c:\\Users\\khali\\Desktop\\eXPLORE\\services\\recommender\\checkpoints\\model_b_active.pt",
+    "active_model_c": "c:\\Users\\khali\\Desktop\\eXPLORE\\services\\recommender\\checkpoints\\model_c_active.pt",
+    "metrics_a": {
+        "auc": 1.0,
+        "pr_auc": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+    },
+    "metrics_b": {
+        "auc": 1.0,
+        "pr_auc": 0.5
+    },
+    "metrics_c": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0
+    },
+    "promotion_threshold_pct": 1.0
+}

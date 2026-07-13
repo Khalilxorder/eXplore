@@ -1,0 +1,63 @@
+{
+    "name":  "explore",
+    "version":  "0.1.0",
+    "private":  true,
+    "engines":  {
+                    "node":  "22.x"
+                },
+    "scripts":  {
+                    "dev":  "powershell -ExecutionPolicy Bypass -File scripts/run-local-stack.ps1",
+                    "dev:web":  "next dev --hostname 0.0.0.0 --webpack",
+                    "dev:stack":  "powershell -ExecutionPolicy Bypass -File scripts/run-local-stack.ps1",
+                    "site:background":  "powershell -ExecutionPolicy Bypass -File scripts/start-local-preview.ps1",
+                    "build:local":  "powershell -ExecutionPolicy Bypass -File scripts/build-static-export.ps1",
+                    "build":  "node scripts/build-next-with-metadata.mjs",
+                    "start":  "node scripts/serve-static.mjs out 3000",
+                    "lint":  "eslint src backend scripts",
+                    "test:frontend":  "node scripts/verify-runtime-reference-guards.mjs \u0026\u0026 node scripts/verify-event-priority.mjs \u0026\u0026 node scripts/verify-reference-box.mjs \u0026\u0026 node scripts/verify-video-library.mjs \u0026\u0026 node scripts/verify-private-messaging-ui.mjs",
+                    "test:news-page":  "node scripts/verify-news-page.mjs",
+                    "test:live-messaging":  "node scripts/verify-live-private-messaging.mjs",
+                    "test:backend":  "node scripts/run-backend-tests.mjs",
+                    "smoke:runtime":  "node scripts/verify-runtime.mjs",
+                    "verify":  "npm run lint \u0026\u0026 npm run test:frontend \u0026\u0026 npm run test:backend \u0026\u0026 npm run build \u0026\u0026 npm run test:news-page \u0026\u0026 npm run smoke:runtime \u0026\u0026 node scripts/verify-release-contract.mjs",
+                    "test:release":  "node scripts/verify-release-contract.mjs",
+                    "verify:product":  "node scripts/verify-product.mjs",
+                    "scholarships:official":  "npm --prefix backend run scholarships:official",
+                    "scholarships:official:dry-run":  "npm --prefix backend run scholarships:official:dry-run",
+                    "capgo:publish":  "powershell -ExecutionPolicy Bypass -File scripts/publish-capgo-update.ps1",
+                    "android:live":  "powershell -ExecutionPolicy Bypass -File scripts/run-android-live.ps1",
+                    "android:debug":  "powershell -ExecutionPolicy Bypass -File scripts/build-android-debug.ps1",
+                    "android:release":  "powershell -ExecutionPolicy Bypass -File scripts/build-android-release.ps1",
+                    "config:sync":  "powershell -ExecutionPolicy Bypass -File scripts/sync-machine-config.ps1",
+                    "config:init-gemini-pool":  "powershell -ExecutionPolicy Bypass -File scripts/init-gemini-key-pool.ps1",
+                    "config:add-gemini-key":  "powershell -ExecutionPolicy Bypass -File scripts/add-gemini-key.ps1",
+                    "config:open":  "powershell -ExecutionPolicy Bypass -File scripts/sync-machine-config.ps1 -Open",
+                    "deploy:vercel":  "powershell -ExecutionPolicy Bypass -File scripts/deploy-vercel.ps1",
+                    "deploy:netlify":  "powershell -ExecutionPolicy Bypass -File scripts/deploy-netlify.ps1",
+                    "deploy:cloudflare":  "powershell -ExecutionPolicy Bypass -File scripts/deploy-cloudflare-pages.ps1",
+                    "deploy:gcloud":  "powershell -ExecutionPolicy Bypass -File scripts/deploy-google-cloud-run.ps1",
+                    "scheduler:gcloud":  "powershell -ExecutionPolicy Bypass -File scripts/create-google-cloud-scheduler.ps1"
+                },
+    "dependencies":  {
+                         "@capacitor/android":  "^8.2.0",
+                         "@capacitor/app":  "^8.0.1",
+                         "@capacitor/browser":  "^8.0.2",
+                         "@capacitor/cli":  "^8.2.0",
+                         "@capacitor/core":  "^8.2.0",
+                         "@capacitor/local-notifications":  "^8.0.2",
+                         "@capacitor/push-notifications":  "^8.0.2",
+                         "@capgo/capacitor-updater":  "^8.45.8",
+                         "@supabase/supabase-js":  "^2.98.0",
+                         "@swc/helpers":  "^0.5.23",
+                         "next":  "^16.2.6",
+                         "react":  "19.2.3",
+                         "react-dom":  "19.2.3"
+                     },
+    "devDependencies":  {
+                            "eslint":  "^9",
+                            "eslint-config-next":  "^16.2.6"
+                        },
+    "overrides":  {
+                      "postcss":  "8.5.10"
+                  }
+}
