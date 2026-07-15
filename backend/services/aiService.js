@@ -41,15 +41,17 @@ const MAX_GEMINI_IN_FLIGHT_PER_KEY = Math.max(
   1,
   Math.min(Number(process.env.GEMINI_MAX_IN_FLIGHT_PER_KEY || 1), 8)
 );
+const DEFAULT_GEMINI_REQUEST_TIMEOUT_MS = 15000;
 const GEMINI_KEY_COOLDOWN_BASE_MS = {
-  401: 6 * 60 * 60 * 1000,
-  403: 15 * 60 * 1000,
+  // A disabled/deleted bound service account will not recover during a normal session.
+  401: 24 * 60 * 60 * 1000,
+  403: 24 * 60 * 60 * 1000,
   429: 5 * 60 * 1000,
   500: 60 * 1000,
   503: 60 * 1000,
   default: 5 * 60 * 1000,
 };
-const GEMINI_KEY_COOLDOWN_MAX_MS = 6 * 60 * 60 * 1000;
+const GEMINI_KEY_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
 const GEMINI_KEY_COOLDOWN_MULTIPLIER = 2;
 const geminiKeyCooldowns = new Map();
 const geminiKeyRuntimeState = new Map();
@@ -205,6 +207,13 @@ function getGeminiCooldownDurationMs(status, failureCount = 0) {
   const base = GEMINI_KEY_COOLDOWN_BASE_MS[normalizedStatus] || GEMINI_KEY_COOLDOWN_BASE_MS.default;
   const exponent = Math.max(0, Number(failureCount) || 0);
   return Math.min(GEMINI_KEY_COOLDOWN_MAX_MS, base * (GEMINI_KEY_COOLDOWN_MULTIPLIER ** exponent));
+}
+
+function getGeminiRequestTimeoutMs() {
+  return Math.max(
+    3000,
+    Math.min(Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || DEFAULT_GEMINI_REQUEST_TIMEOUT_MS), 60000)
+  );
 }
 
 function sanitizeAiErrorMessage(error) {
@@ -439,6 +448,20 @@ async function readResponseText(response) {
   }
 }
 
+async function fetchGeminiWithTimeout(url, options) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), getGeminiRequestTimeoutMs());
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function executeGeminiRequest({ model, action, body, parser, maxKeyAttempts = MAX_GEMINI_KEYS_PER_REQUEST, includeCoolingFallback = false }) {
   const apiKeys = getGeminiKeyRotationOrder({ includeCoolingFallback });
   if (apiKeys.length === 0) {
@@ -465,7 +488,7 @@ async function executeGeminiRequest({ model, action, body, parser, maxKeyAttempt
     beginGeminiRequest(apiKey);
     let response;
     try {
-      response = await fetch(`${GEMINI_API_URL}/${model}:${action}`, {
+      response = await fetchGeminiWithTimeout(`${GEMINI_API_URL}/${model}:${action}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -475,7 +498,16 @@ async function executeGeminiRequest({ model, action, body, parser, maxKeyAttempt
       });
     } catch (error) {
       finishGeminiRequest(apiKey, false);
-      throw error;
+      const networkStatus = error?.name === 'AbortError' ? 503 : 500;
+      const errorText = sanitizeAiErrorMessage(error);
+      lastError = new Error(
+        `Gemini API request failed (${model}:${action})${errorText ? ` ${errorText.slice(0, 240)}` : ''}`
+      );
+      markGeminiKeyCooldown(apiKey, networkStatus);
+      if (index < attempts.length - 1) {
+        continue;
+      }
+      throw lastError;
     }
 
     if (response.ok) {
@@ -820,6 +852,7 @@ function resetLiveProbe() {
 exports.probeLiveProvider = async ({
   providerPreference = 'gemini',
   timeoutMs = 8000,
+  maxKeyAttempts = 3,
 } = {}) => {
   const startedAt = Date.now();
   const provider = getAiProvider(providerPreference);
@@ -846,7 +879,11 @@ exports.probeLiveProvider = async ({
       exports.generateStructuredJson({
         providerPreference,
         temperature: 0,
-        maxKeyAttempts: 1,
+        // Probe a small eligible subset so one invalid key cannot make the
+        // entire configured pool appear unavailable.
+        maxKeyAttempts: provider === 'gemini'
+          ? Math.max(1, Math.min(Number(maxKeyAttempts) || 1, 3))
+          : 1,
         systemPrompt: 'Return only valid JSON. This is a health probe for eXplore.',
         userPrompt: 'Return JSON exactly shaped as {"ok":true,"label":"live"}',
       }),

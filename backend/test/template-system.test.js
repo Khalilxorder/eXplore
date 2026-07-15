@@ -517,3 +517,78 @@ test('template-driven feed reranks items, sections content, and gates distractin
     db.close();
   }
 });
+
+test('template-driven feed excludes undated and expired items even when they were ingested recently', async () => {
+  const db = createFeedDb();
+
+  try {
+    insertSource(db, 'src_freshness', 'Freshness Source');
+
+    const analysis = {
+      channelType: 'written',
+      lifeImpact: 0.82,
+      decisionUsefulness: 0.8,
+      distractionRisk: 0.08,
+      matchedConcepts: ['ai', 'release'],
+      visualMeaningLabel: 'AI capability changed',
+      visualMeaningPrompt: 'Meaning only.',
+      visualMeaningStatus: 'prompt_ready',
+      visualMeaningImageUrl: '',
+    };
+    const baseItem = {
+      source_id: 'src_freshness',
+      content_type: 'article',
+      channel_type: 'written',
+      rarity_score: 0.4,
+      depth_score: 0.72,
+      freshness_score: 0.8,
+      timeless_score: 0.42,
+      clickbait_score: 0.04,
+      topics: ['AI'],
+      analysis,
+    };
+
+    insertItem(db, {
+      ...baseItem,
+      id: 'fresh_item',
+      external_id: 'fresh_item',
+      title: 'A dated AI release with real decision value',
+      url: 'https://example.com/fresh-item',
+      publish_date: recentIso(2),
+      summary: 'Fresh and dated source material.',
+    });
+    insertItem(db, {
+      ...baseItem,
+      id: 'undated_item',
+      external_id: 'undated_item',
+      title: 'Undated item inserted moments ago',
+      url: 'https://example.com/undated-item',
+      publish_date: null,
+      summary: 'Missing the publication timestamp required for a current-news claim.',
+    });
+    insertItem(db, {
+      ...baseItem,
+      id: 'expired_item',
+      external_id: 'expired_item',
+      title: 'Old AI release',
+      url: 'https://example.com/expired-item',
+      publish_date: recentIso(73),
+      summary: 'Older than the visible news window.',
+    });
+
+    const feed = await templateRankingService.buildTemplateDrivenFeed(db, {
+      fixedRules: [],
+      adaptiveRules: [],
+      sourceMix: { written: 100, socialVideo: 0, socialPhoto: 0 },
+    }, {
+      scanLimit: 10,
+      limitPerSection: 10,
+      syncAnalysisLimit: 0,
+    });
+    const visibleIds = feed.sections.flatMap((section) => section.items.map((item) => item.id));
+
+    assert.deepEqual(visibleIds, ['fresh_item']);
+  } finally {
+    db.close();
+  }
+});

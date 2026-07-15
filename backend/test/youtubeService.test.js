@@ -111,6 +111,19 @@ test('placeholder and junk YouTube API keys are ignored', () => {
   }
 });
 
+test('temporarily cooling YouTube keys are retryable so public fallbacks remain available', () => {
+  assert.equal(
+    youtubeService.__test__.isRetryableYouTubeError(
+      new Error('YouTube API keys are temporarily cooling (1/1).')
+    ),
+    true
+  );
+});
+
+test('transient YouTube fetch failures are retryable so discovery can use public search', () => {
+  assert.equal(youtubeService.__test__.isRetryableYouTubeError(new Error('fetch failed')), true);
+});
+
 test('search-result HTML fallback parses recent YouTube videos without an API key', () => {
   const payload = {
     contents: {
@@ -248,4 +261,201 @@ test('description fallback is standardized when transcript metadata is missing',
   assert.equal(normalized.transcriptPreview, 'This is the video description and becomes the fallback text.');
   assert.equal(normalized.transcriptProvider, 'youtube-watch-page');
   assert.equal(normalized.transcript_status, 'description_only');
+});
+
+test('public YouTube search retries a transient failure and shares cached results', async () => {
+  const originalFetch = global.fetch;
+  const payload = {
+    contents: {
+      twoColumnSearchResultsRenderer: {
+        primaryContents: {
+          sectionListRenderer: {
+            contents: [{
+              itemSectionRenderer: {
+                contents: [{
+                  videoRenderer: {
+                    videoId: 'cachetest001',
+                    thumbnail: { thumbnails: [{ url: 'https://img.example/cache.jpg' }] },
+                    title: { runs: [{ text: 'Cached public YouTube result' }] },
+                    longBylineText: { runs: [{ text: 'eXplore test channel' }] },
+                    publishedTimeText: { simpleText: '1 hour ago' },
+                  },
+                }],
+              },
+            }],
+          },
+        },
+      },
+    },
+  };
+  const html = `<html><script>var ytInitialData = ${JSON.stringify(payload)};</script></html>`;
+  let calls = 0;
+
+  youtubeService.__test__.resetPublicYoutubeFallbackCaches();
+  global.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      throw new Error('fetch failed');
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      text: async () => html,
+    };
+  };
+
+  try {
+    const first = await youtubeService.__test__.searchRecentVideosWithoutApiKey('eXplore cache test', 3);
+    const second = await youtubeService.__test__.searchRecentVideosWithoutApiKey('eXplore cache test', 3);
+
+    assert.equal(first.length, 1);
+    assert.equal(second.length, 1);
+    assert.equal(first[0].title, 'Cached public YouTube result');
+    assert.equal(calls, 2);
+  } finally {
+    youtubeService.__test__.resetPublicYoutubeFallbackCaches();
+    global.fetch = originalFetch;
+  }
+});
+
+test('hydration uses public metadata when every configured key is cooling', async () => {
+  const envNames = [
+    'YOUTUBE_API_KEY',
+    'YOUTUBE_API_KEYS',
+    ...Array.from({ length: 10 }, (_value, index) => `YOUTUBE_API_KEY_${index + 1}`),
+  ];
+  const originalEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
+  const originalFetch = global.fetch;
+
+  for (const name of envNames) {
+    delete process.env[name];
+  }
+  process.env.YOUTUBE_API_KEY = 'AIzaPublicFallbackKey1234567890';
+  youtubeService.__test__.resetYouTubeKeyCooldowns();
+  youtubeService.__test__.resetPublicYoutubeFallbackCaches();
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => '<html><body>No captions here</body></html>',
+  });
+
+  try {
+    await assert.rejects(
+      () => youtubeService.__test__.executeYouTubeRequest(async () => {
+        const error = new Error('quota exceeded');
+        error.code = 429;
+        throw error;
+      }),
+      /quota exceeded/
+    );
+
+    const results = await youtubeService.hydrateSearchResults([{
+      videoId: 'publicmeta1',
+      title: 'Public metadata remains visible',
+      description: 'A usable public description.',
+      durationSeconds: 120,
+      viewCount: 42,
+      url: 'https://www.youtube.com/watch?v=publicmeta1',
+    }]);
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].title, 'Public metadata remains visible');
+    assert.equal(results[0].durationSeconds, 120);
+    assert.equal(results[0].viewCount, 42);
+    assert.equal(results[0].transcriptStatus, 'description_only');
+  } finally {
+    youtubeService.__test__.resetYouTubeKeyCooldowns();
+    youtubeService.__test__.resetPublicYoutubeFallbackCaches();
+    for (const name of envNames) {
+      if (originalEnv[name] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = originalEnv[name];
+      }
+    }
+    global.fetch = originalFetch;
+  }
+});
+
+test('channel fallback does not repeat a failed RSS request before public search', async () => {
+  const envNames = [
+    'YOUTUBE_API_KEY',
+    'YOUTUBE_API_KEYS',
+    ...Array.from({ length: 10 }, (_value, index) => `YOUTUBE_API_KEY_${index + 1}`),
+  ];
+  const originalEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
+  const originalFetch = global.fetch;
+  const channelId = 'UCpublicchannel1234567890';
+  const payload = {
+    contents: {
+      twoColumnSearchResultsRenderer: {
+        primaryContents: {
+          sectionListRenderer: {
+            contents: [{
+              itemSectionRenderer: {
+                contents: [{
+                  videoRenderer: {
+                    videoId: 'channeltest1',
+                    thumbnail: { thumbnails: [{ url: 'https://img.example/channel.jpg' }] },
+                    title: { runs: [{ text: 'Official channel update' }] },
+                    longBylineText: {
+                      runs: [{
+                        text: 'Official Channel',
+                        navigationEndpoint: { browseEndpoint: { browseId: channelId } },
+                      }],
+                    },
+                    publishedTimeText: { simpleText: '2 hours ago' },
+                  },
+                }],
+              },
+            }],
+          },
+        },
+      },
+    },
+  };
+  const html = `<html><script>var ytInitialData = ${JSON.stringify(payload)};</script></html>`;
+  const calls = [];
+
+  for (const name of envNames) {
+    delete process.env[name];
+  }
+  youtubeService.__test__.resetPublicYoutubeFallbackCaches();
+  global.fetch = async (input) => {
+    const url = String(input || '');
+    calls.push(url);
+    if (url.includes('/feeds/videos.xml')) {
+      return { ok: false, status: 404, text: async () => '' };
+    }
+    if (url.includes('/results?')) {
+      return { ok: true, status: 200, text: async () => html };
+    }
+    if (url.includes('/watch?v=channeltest1')) {
+      return { ok: true, status: 200, text: async () => '<html><body>No captions</body></html>' };
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  try {
+    const results = await youtubeService.fetchRecentVideosByChannel(channelId, {
+      maxResults: 1,
+      query: 'Official Channel',
+    });
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].videoId, 'channeltest1');
+    assert.equal(calls.filter((url) => url.includes('/feeds/videos.xml')).length, 1);
+    assert.equal(calls.length, 3);
+  } finally {
+    youtubeService.__test__.resetPublicYoutubeFallbackCaches();
+    for (const name of envNames) {
+      if (originalEnv[name] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = originalEnv[name];
+      }
+    }
+    global.fetch = originalFetch;
+  }
 });

@@ -2,8 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
 
+// Discovery tests validate deterministic ingestion. They must not call a paid
+// or rate-limited provider while global fetch is intentionally stubbed.
+process.env.DISCOVERY_AI_ANALYSIS_BUDGET = '0';
+
 const alertRadarService = require('../src/services/alertRadarService');
 const feedDiscoveryService = require('../src/services/feedDiscoveryService');
+const aiService = require('../services/aiService');
 const youtubeService = require('../services/youtubeService');
 
 function createDiscoveryDb() {
@@ -176,6 +181,44 @@ function createDiscoveryDb() {
   return db;
 }
 
+test('radar articles are stored in the written channel instead of the video channel', () => {
+  const db = createDiscoveryDb();
+  const candidate = {
+    videoId: 'radar:official-release',
+    platform: 'radar',
+    contentType: 'article',
+    sourceRef: 'radar:openai',
+    sourceLabel: 'OpenAI',
+    sourceUrl: 'https://openai.com/news',
+    sourceCategory: 'AI Release Watch',
+    channelTitle: 'OpenAI',
+    title: 'Verified official release',
+    url: 'https://openai.com/news/verified-release',
+    publishDate: new Date().toISOString(),
+    description: 'A verified first-party release.',
+    tags: ['AI'],
+    channelRow: { trust_tier: 5, platform: 'radar' },
+  };
+  const analysis = { summary: candidate.description, topics: ['AI'], scores: {} };
+  const scorePack = {
+    rarityScore: 0.5,
+    depthScore: 0.7,
+    sourceTrust: 1,
+    freshnessScore: 0.9,
+    timelessScore: 0.4,
+    clickbaitPenalty: 0.05,
+  };
+
+  try {
+    feedDiscoveryService.__test__.upsertContentItem(db, candidate, analysis, scorePack, candidate.channelRow);
+    const row = db.prepare("SELECT content_type, channel_type FROM content_items WHERE external_id = 'radar:official-release'").get();
+    assert.equal(row.content_type, 'article');
+    assert.equal(row.channel_type, 'written');
+  } finally {
+    db.close();
+  }
+});
+
 test('builds fallback discovery candidates from AI release alerts', () => {
   const candidates = feedDiscoveryService.__test__.buildDiscoveryFallbackCandidatesFromAlerts([
     {
@@ -187,7 +230,7 @@ test('builds fallback discovery candidates from AI release alerts', () => {
       sourceLabel: 'Anthropic news',
       source_type: 'official',
       official_source: true,
-      publishedAt: '2026-03-29T12:00:00.000Z',
+      publishedAt: new Date(Date.now() - (60 * 60 * 1000)).toISOString(),
       release_watch_company: 'anthropic',
       release_watch_company_label: 'Anthropic',
       fingerprint: 'anthropic-claude-4-6',
@@ -201,6 +244,22 @@ test('builds fallback discovery candidates from AI release alerts', () => {
   assert.equal(candidates[0].sourceLabel, 'Anthropic');
   assert.match(candidates[0].videoId, /^radar:/);
   assert.equal(candidates[0].channelRow.trust_tier, 5);
+});
+
+test('radar fallback ignores alerts without a real publication date', () => {
+  const candidates = feedDiscoveryService.__test__.buildDiscoveryFallbackCandidatesFromAlerts([
+    {
+      category: 'ai',
+      title: 'Anthropic launches a current-looking release without source timing',
+      url: 'https://www.anthropic.com/news/undated-release',
+      source: 'Anthropic',
+      official_source: true,
+      seenAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  ]);
+
+  assert.equal(candidates.length, 0);
 });
 
 test('refreshDiscoveryForScope falls back to radar alerts when topic searches hit quota', async () => {
@@ -298,11 +357,13 @@ test('refreshDiscoveryForScope falls back to radar alerts when topic searches hi
   }
 });
 
-test('getDiscoveryStatus keeps the fallback message visible when radar-backed discovery is live', async () => {
+test('getDiscoveryStatus keeps the fallback message visible when radar is live but other sources are stale', async () => {
   const db = createDiscoveryDb();
   const originalSearchVideos = youtubeService.searchVideos;
   const originalHasKey = youtubeService.hasConfiguredYouTubeApiKey;
   const originalGetPriorityAlerts = alertRadarService.getPriorityAlerts;
+  const checkedAt = new Date().toISOString();
+  const publishedAt = new Date(Date.now() - (5 * 60 * 1000)).toISOString();
 
   db.prepare(`
     INSERT INTO youtube_topic_monitors (
@@ -324,7 +385,7 @@ test('getDiscoveryStatus keeps the fallback message visible when radar-backed di
     throw error;
   };
   alertRadarService.getPriorityAlerts = async () => ({
-    checkedAt: new Date('2026-03-30T12:05:00.000Z').toISOString(),
+    checkedAt,
     cacheAgeMs: 0,
     reviewLog: [],
     alerts: [
@@ -336,7 +397,7 @@ test('getDiscoveryStatus keeps the fallback message visible when radar-backed di
         sourceLabel: 'OpenAI',
         source_type: 'official',
         official_source: true,
-        publishedAt: '2026-03-30T12:00:00.000Z',
+        publishedAt,
         summary: 'Official OpenAI launch post for a new developer tool.',
         release_watch_company: 'openai',
         release_watch_company_label: 'OpenAI',
@@ -353,7 +414,7 @@ test('getDiscoveryStatus keeps the fallback message visible when radar-backed di
     });
 
     const status = feedDiscoveryService.getDiscoveryStatus(db, 'tester-status');
-    assert.equal(status.status, 'live');
+    assert.equal(status.status, 'partial');
     assert.match(status.message, /fallback/i);
     assert.ok(status.source_health.some((entry) => entry.platform === 'radar' && entry.status === 'live'));
     assert.ok(status.pipeline_health);
@@ -370,7 +431,11 @@ test('refreshDiscoveryForScope turns Source Pack feeds into real article candida
   const db = createDiscoveryDb();
   const originalFetch = global.fetch;
   const originalGetPriorityAlerts = alertRadarService.getPriorityAlerts;
+  const originalGenerateStructuredJson = aiService.generateStructuredJson;
   const publishedAt = new Date(Date.now() - (20 * 60 * 1000)).toUTCString();
+
+  // Source-pack ingestion is deterministic here; provider behavior has its own tests.
+  aiService.generateStructuredJson = async () => null;
 
   await feedDiscoveryService.addWatchedSourcePack(db, 'tester-source-pack', {
     topic: 'cheap AI tools that give me an edge',
@@ -434,11 +499,12 @@ test('refreshDiscoveryForScope turns Source Pack feeds into real article candida
     assert.match(health.metadata_json, /feed_url/);
 
     const status = feedDiscoveryService.getDiscoveryStatus(db, 'tester-source-pack');
-    assert.equal(status.status, 'live');
+    assert.equal(status.status, 'partial');
     assert.ok(status.pipeline_health.source_packs.candidate_count > 0);
   } finally {
     global.fetch = originalFetch;
     alertRadarService.getPriorityAlerts = originalGetPriorityAlerts;
+    aiService.generateStructuredJson = originalGenerateStructuredJson;
     db.close();
   }
 });
@@ -714,4 +780,237 @@ test('interview-signal candidates outrank generic fresh-signal duplicates during
   feedDiscoveryService.__test__.mergeDiscoveryCandidates(deduped, [candidate]);
 
   assert.equal(deduped.get('dup-video').lane, 'interview_signal');
+});
+
+test('people-of-interest monitoring is bounded and gives each person useful queries', () => {
+  const monitors = feedDiscoveryService.__test__.buildPeopleOfInterestMonitors({
+    peopleOfInterest: [
+      {
+        name: 'A third figure',
+        aliases: ['Third figure alias'],
+        topics: ['public leadership', 'institution building', 'extra topic'],
+      },
+      {
+        name: 'A fourth figure',
+        topics: ['This must not displace the highest-priority figures'],
+      },
+    ],
+  });
+
+  assert.ok(monitors.length <= 15);
+  assert.ok(monitors.some((monitor) => monitor.query === 'Sheikh Mohammed bin Rashid Al Maktoum interview'));
+  assert.ok(monitors.some((monitor) => monitor.query === 'Dario Amodei interview'));
+  assert.ok(monitors.some((monitor) => monitor.query === 'A third figure interview'));
+  assert.equal(monitors.some((monitor) => monitor.query.includes('A fourth figure')), false);
+});
+
+test('system monitor sync retires obsolete generated queries without touching user rules', () => {
+  const db = createDiscoveryDb();
+
+  db.prepare(`
+    INSERT INTO youtube_topic_monitors (
+      id, scope_key, query_key, query, intent, weight, active, system_managed
+    ) VALUES (?, ?, ?, ?, ?, ?, 1, 1)
+  `).run(
+    'obsolete-system-query',
+    'public',
+    'obsolete-system-query',
+    'obsolete system query',
+    'personal_match',
+    0.5
+  );
+  db.prepare(`
+    INSERT INTO youtube_topic_monitors (
+      id, scope_key, query_key, query, intent, weight, active, system_managed
+    ) VALUES (?, ?, ?, ?, ?, ?, 1, 0)
+  `).run(
+    'user-owned-query',
+    'public',
+    'user-owned-query',
+    'user-owned query',
+    'personal_match',
+    0.5
+  );
+
+  try {
+    feedDiscoveryService.__test__.ensureSeedData(db, '', {});
+
+    const obsolete = db.prepare(`SELECT active FROM youtube_topic_monitors WHERE id = ?`).get('obsolete-system-query');
+    const userOwned = db.prepare(`SELECT active FROM youtube_topic_monitors WHERE id = ?`).get('user-owned-query');
+    const activeSystemCount = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM youtube_topic_monitors
+      WHERE scope_key = 'public' AND system_managed = 1 AND active = 1
+    `).get();
+
+    assert.equal(obsolete.active, 0);
+    assert.equal(userOwned.active, 1);
+    assert.ok(activeSystemCount.count <= 14);
+  } finally {
+    db.close();
+  }
+});
+
+test('feed candidates older than three days are hidden and marked stale', () => {
+  const db = createDiscoveryDb();
+  const freshPublishedAt = new Date(Date.now() - (6 * 60 * 60 * 1000)).toISOString();
+  const oldPublishedAt = new Date(Date.now() - (73 * 60 * 60 * 1000)).toISOString();
+
+  db.prepare(`
+    INSERT INTO feed_candidates (
+      id, scope_key, content_id, external_id, platform, lane, title, url, published_at,
+      overall_score, stale, last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `).run(
+    'fresh-candidate',
+    'freshness-scope',
+    'fresh-content',
+    'fresh-external',
+    'youtube',
+    'fresh_signal',
+    'Fresh item',
+    'https://example.com/fresh',
+    freshPublishedAt,
+    0.9
+  );
+  db.prepare(`
+    INSERT INTO feed_candidates (
+      id, scope_key, content_id, external_id, platform, lane, title, url, published_at,
+      overall_score, stale, last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `).run(
+    'old-candidate',
+    'freshness-scope',
+    'old-content',
+    'old-external',
+    'youtube',
+    'fresh_signal',
+    'Old item',
+    'https://example.com/old',
+    oldPublishedAt,
+    1
+  );
+  db.prepare(`
+    INSERT INTO feed_candidates (
+      id, scope_key, content_id, external_id, platform, lane, title, url,
+      overall_score, stale, last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `).run(
+    'undated-candidate',
+    'freshness-scope',
+    'undated-content',
+    'undated-external',
+    'source_pack',
+    'fresh_signal',
+    'Undated item',
+    'https://example.com/undated',
+    1
+  );
+
+  try {
+    feedDiscoveryService.__test__.pruneScope(db, 'freshness-scope');
+    const visible = feedDiscoveryService.__test__.listFeedCandidates(db, 'freshness-scope');
+    const oldRow = db.prepare(`SELECT stale FROM feed_candidates WHERE id = ?`).get('old-candidate');
+    const undatedRow = db.prepare(`SELECT stale FROM feed_candidates WHERE id = ?`).get('undated-candidate');
+
+    assert.equal(visible.length, 1);
+    assert.equal(visible[0].id, 'fresh-candidate');
+    assert.equal(oldRow.stale, 1);
+    assert.equal(undatedRow.stale, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test('undated radar-derived candidates are retired and their content date is cleared', () => {
+  const db = createDiscoveryDb();
+  db.exec(`
+    CREATE TABLE priority_alerts (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      url TEXT,
+      published_at TEXT
+    );
+  `);
+  db.prepare(`
+    INSERT INTO content_items (id, external_id, title, url, publish_date)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    'radar-content',
+    'radar:undated-alert',
+    'Undated official alert',
+    'https://example.com/undated-alert',
+    new Date().toISOString()
+  );
+  db.prepare(`
+    INSERT INTO feed_candidates (
+      id, scope_key, content_id, external_id, platform, lane, title, url, published_at,
+      overall_score, stale, last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `).run(
+    'radar-candidate',
+    'public',
+    'radar-content',
+    'radar:undated-alert',
+    'radar',
+    'fresh_signal',
+    'Undated official alert',
+    'https://example.com/undated-alert',
+    new Date().toISOString(),
+    1
+  );
+  db.prepare(`
+    INSERT INTO priority_alerts (id, title, url, published_at)
+    VALUES (?, ?, ?, NULL)
+  `).run('undated-alert', 'Undated official alert', 'https://example.com/undated-alert');
+
+  try {
+    const result = feedDiscoveryService.__test__.sanitizeUndatedRadarDerivedContent(db);
+    const candidate = db.prepare(`SELECT stale FROM feed_candidates WHERE id = ?`).get('radar-candidate');
+    const content = db.prepare(`SELECT publish_date FROM content_items WHERE id = ?`).get('radar-content');
+
+    assert.equal(result.candidatesRetired, 1);
+    assert.equal(result.contentDatesCleared, 1);
+    assert.equal(candidate.stale, 1);
+    assert.equal(content.publish_date, null);
+  } finally {
+    db.close();
+  }
+});
+
+test('source health is stale when a source returns only expired or undated material', () => {
+  const db = createDiscoveryDb();
+
+  try {
+    feedDiscoveryService.__test__.upsertSourceHealth(db, 'source-freshness-scope', {
+      lane: 'tracked',
+      sourceKey: 'expired-source',
+      sourceLabel: 'Expired source',
+      producedItems: 3,
+      freshnessHours: 96,
+      platform: 'youtube',
+    });
+    feedDiscoveryService.__test__.upsertSourceHealth(db, 'source-freshness-scope', {
+      lane: 'tracked',
+      sourceKey: 'undated-source',
+      sourceLabel: 'Undated source',
+      producedItems: 2,
+      freshnessHours: null,
+      platform: 'youtube',
+    });
+
+    const health = db.prepare(`
+      SELECT source_key, status
+      FROM source_health_status
+      WHERE scope_key = 'source-freshness-scope'
+      ORDER BY source_key
+    `).all();
+
+    assert.deepEqual(health, [
+      { source_key: 'expired-source', status: 'stale' },
+      { source_key: 'undated-source', status: 'stale' },
+    ]);
+  } finally {
+    db.close();
+  }
 });

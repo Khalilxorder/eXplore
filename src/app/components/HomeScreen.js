@@ -45,6 +45,7 @@ const FEED_CACHE_TTL_MS = 10 * 60 * 1000;
 const BACKGROUND_REFRESH_THROTTLE_MS = 60 * 1000;
 const MIN_GOOD_FEED_CACHE_ITEMS = 4;
 const TARGET_LIVE_FEED_ITEMS = 8;
+const MAX_VISIBLE_NEWS_AGE_HOURS = 72;
 const FEED_BACKGROUND_POLL_MS = 60 * 1000; // Check quietly once per minute while the feed is visible.
 const FEED_FIRST_SCREEN_TIMEOUT_MS = 11000;
 const EXPLORE_FEED_REFRESH_EVENT = 'explore-feed-refresh';
@@ -940,7 +941,7 @@ function describeTrustReason(item = {}) {
   return 'Monitored source that matched the current interest profile.';
 }
 
-function isRecentEnough(value, maxAgeHours = 24 * 30) {
+function isRecentEnough(value, maxAgeHours = MAX_VISIBLE_NEWS_AGE_HOURS) {
   const timestamp = getItemTimestamp(value);
   if (!timestamp) {
     return false;
@@ -1084,8 +1085,7 @@ function computeTranscriptHighlightPriority(item, peopleOfInterest = []) {
 }
 
 function selectLatestAiAlerts(alerts = [], limit = 12) {
-  const MAX_AGE_DAYS = 3;
-  const cutoffMs = Date.now() - (MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+  const cutoffMs = Date.now() - (MAX_VISIBLE_NEWS_AGE_HOURS * 60 * 60 * 1000);
   const deduped = new Map();
 
   for (const alert of Array.isArray(alerts) ? alerts : []) {
@@ -1188,7 +1188,8 @@ function selectLatestTranscriptHighlightItems(feedPayload, peopleOfInterest = []
       const isTrackedTranscriptSignal = Boolean(item?.hasTranscript)
         && lane === 'tracked'
         && (AI_FEED_SIGNAL_PATTERN.test(text) || REGIONAL_SIGNAL_PATTERN.test(text));
-      const qualifies = isRecentEnough(item?.date) && (isPeopleInterview || isTrackedTranscriptSignal);
+      const qualifies = isRecentEnough(item?.date, MAX_VISIBLE_NEWS_AGE_HOURS)
+        && (isPeopleInterview || isTrackedTranscriptSignal);
 
       if (!qualifies || !key || deduped.has(key)) {
         continue;
@@ -1295,7 +1296,7 @@ function selectRelevantFeedItems(feedPayload, template, limit = 12) {
       }
 
       const date = item?.date || item?.publishedAt || item?.publishDate || item?.created_at;
-      if (!isRecentEnough(date, 24 * 10)) {
+      if (!isRecentEnough(date, MAX_VISIBLE_NEWS_AGE_HOURS)) {
         continue;
       }
 
@@ -1461,32 +1462,12 @@ function buildLatestNewsItems({
 function filterLatestNewsItems(items = []) {
   return normalizeLatestNewsItems(items)
     .filter((item) => {
-      if (item?.emergencySnapshot) {
-        return true;
-      }
-
-      if (!item?.date) {
+      if (!item?.date || !isRecentEnough(item.date, MAX_VISIBLE_NEWS_AGE_HOURS)) {
         return false;
       }
 
-      if (item?.kind === 'official' || item?.alert) {
-        return isRecentEnough(item.date, 24 * 7);
-      }
-
-      if (Number.isFinite(Number(item?.directNewsScore))) {
-        return isRecentEnough(item.date, 24 * 10);
-      }
-
-      if (isRegionalLatestItem(item)) {
-        return isRecentEnough(item.date, 24 * 3);
-      }
-
       if (item?.kind === 'normal' || item?.normalNewsCategory) {
-        return hasMeaningfulLatestNewsSignal(item) && isRecentEnough(item.date, 24 * 3);
-      }
-
-      if (isVoiceLatestItem(item)) {
-        return isRecentEnough(item.date, 24 * 5);
+        return hasMeaningfulLatestNewsSignal(item);
       }
 
       if (isWrittenLatestItem(item)) {
@@ -1494,11 +1475,9 @@ function filterLatestNewsItems(items = []) {
         if (AI_LOW_SIGNAL_PATTERN.test(text) && !isOfficialLatestItem(item)) {
           return false;
         }
-
-        return isRecentEnough(item.date, 24 * 7);
       }
 
-      return isRecentEnough(item.date, 24 * 5);
+      return true;
     });
 }
 

@@ -12,6 +12,7 @@ const GEMINI_ENV_NAMES = [
   'GEMINI_API_KEY',
   'GOOGLE_AI_API_KEYS',
   'GEMINI_KEY_POOL_FILE',
+  'GEMINI_REQUEST_TIMEOUT_MS',
   ...Array.from({ length: 100 }, (_, index) => index + 1).flatMap((index) => [
     `GOOGLE_AI_API_KEY_${index}`,
     `GOOGLE_GEMINI_API_KEY_${index}`,
@@ -251,6 +252,54 @@ test('Gemini failed requests are capped so one call cannot drain the whole pool'
   }
 });
 
+test('Gemini request timeout rotates to the next available key', async () => {
+  const originalFetch = global.fetch;
+  const keys = [validGeminiKey(91), validGeminiKey(92)];
+  const seenKeys = [];
+
+  global.fetch = async (url, options) => {
+    const keyUsed = options.headers['x-goog-api-key'];
+    seenKeys.push(keyUsed);
+
+    if (keyUsed === keys[0]) {
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('request aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+    }
+
+    return {
+      ok: true,
+      json: async () => ({
+        embedding: {
+          values: [0.5, 0.5, 0.5],
+        },
+      }),
+    };
+  };
+
+  try {
+    await withGeminiEnv({
+      GOOGLE_AI_API_KEY_1: keys[0],
+      GOOGLE_AI_API_KEY_2: keys[1],
+      GEMINI_REQUEST_TIMEOUT_MS: '3000',
+    }, async () => {
+      const vector = await aiService.generateEmbedding('timeout recovery', {
+        providerPreference: 'gemini',
+      });
+
+      assert.deepEqual(vector, [0.5773502691896258, 0.5773502691896258, 0.5773502691896258]);
+      assert.deepEqual(seenKeys, keys);
+      assert.deepEqual(aiService.__test__.getGeminiKeyHealthSummary(keys).cooldownStatuses, { 503: 1 });
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('Gemini key parser accepts one hundred indexed keys in rotation order', async () => {
   const keys = Array.from({ length: 100 }, (_, index) => validGeminiKey(index + 1));
   const env = Object.fromEntries(keys.map((key, index) => [`GOOGLE_AI_API_KEY_${index + 1}`, key]));
@@ -385,6 +434,60 @@ test('live provider probe records a successful Gemini response without leaking k
       assert.equal(diagnostics.liveProbe.status, 'live');
       assert.equal(serialized.includes(key), false);
       assert.equal(serialized.includes('AIza'), false);
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('live provider probe fails over from a disabled key to an eligible Gemini key', async () => {
+  const originalFetch = global.fetch;
+  const keys = [validAiStudioKey(43), validGeminiKey(44)];
+  const seenKeys = [];
+
+  global.fetch = async (url, options) => {
+    const keyUsed = options.headers['x-goog-api-key'];
+    seenKeys.push(keyUsed);
+
+    if (keyUsed === keys[0]) {
+      return {
+        ok: false,
+        status: 401,
+        text: async () => 'The bound service account is deleted or disabled.',
+      };
+    }
+
+    return {
+      ok: true,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { text: '{"ok":true,"label":"live"}' },
+              ],
+            },
+          },
+        ],
+      }),
+    };
+  };
+
+  try {
+    await withGeminiEnv({
+      GOOGLE_AI_API_KEY_1: keys[0],
+      GOOGLE_AI_API_KEY_2: keys[1],
+    }, async () => {
+      aiService.__test__.resetLiveProbe();
+      const probe = await aiService.probeLiveProvider({ providerPreference: 'gemini', timeoutMs: 1000 });
+      const diagnostics = aiService.getSafeModelPoolDiagnostics();
+      const serialized = JSON.stringify(diagnostics);
+
+      assert.equal(probe.status, 'live');
+      assert.deepEqual(seenKeys, keys);
+      assert.deepEqual(diagnostics.cooldownStatuses, { 401: 1 });
+      assert.equal(serialized.includes(keys[0]), false);
+      assert.equal(serialized.includes(keys[1]), false);
     });
   } finally {
     global.fetch = originalFetch;

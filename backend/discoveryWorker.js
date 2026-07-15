@@ -9,6 +9,7 @@ const { ensureSqliteIdealState } = require('./src/db/sqliteBootstrap');
 const templateService = require('./src/services/newsTemplateService');
 const valueHierarchyService = require('./src/services/valueHierarchySync');
 const { refreshDiscoveryForAllScopes } = require('./src/services/feedDiscoveryService');
+const { ensureWrittenNewsCoverage } = require('./src/services/writtenNewsService');
 const { updateWorkerRuntimeStatus } = require('./src/services/pushDeliveryService');
 
 const DISCOVERY_WORKER_NAME = 'best_feed_discovery';
@@ -66,6 +67,28 @@ function resolveIntervalMs() {
   return Math.max(5000, envInterval);
 }
 
+function summarizeDiscoveryResults(results = []) {
+  const scopes = Array.isArray(results) ? results : [];
+  const summary = {
+    refreshedScopes: scopes.length,
+    liveScopes: scopes.filter((entry) => entry.status === 'live').length,
+    partialScopes: scopes.filter((entry) => entry.status === 'partial').length,
+    staleSourceCount: scopes.reduce((total, entry) => total + Number(entry.staleSourceCount || 0), 0),
+    errorSourceCount: scopes.reduce((total, entry) => total + Number(entry.errorSourceCount || 0), 0),
+    candidateCount: scopes.reduce((total, entry) => total + Number(entry.candidateCount || 0), 0),
+    results: scopes,
+  };
+
+  const degraded = summary.partialScopes > 0 || summary.staleSourceCount > 0;
+  return {
+    ...summary,
+    status: degraded ? 'partial' : 'success',
+    message: degraded
+      ? `${summary.staleSourceCount} configured source(s) are not live; ${summary.errorSourceCount} reported an error.`
+      : '',
+  };
+}
+
 async function runDiscoveryCycle(db, { loopMode = 'oneshot' } = {}) {
   updateWorkerRuntimeStatus(db, DISCOVERY_WORKER_NAME, {
     loop_mode: loopMode,
@@ -76,24 +99,33 @@ async function runDiscoveryCycle(db, { loopMode = 'oneshot' } = {}) {
   });
 
   try {
+    // Written sources are part of the same intelligence cycle as discovery.
+    // The coverage service internally throttles network refreshes, so this is
+    // safe to call from the five-minute worker loop.
+    let writtenCoverage = null;
+    let writtenCoverageError = '';
+    try {
+      writtenCoverage = await ensureWrittenNewsCoverage(db);
+    } catch (error) {
+      writtenCoverageError = error?.message || 'Written news refresh failed';
+    }
+
     const results = await refreshDiscoveryForAllScopes(db, {
       resolveTemplateState: (userId) => buildTemplateState(db, userId),
     });
     const summary = {
-      refreshedScopes: results.length,
-      liveScopes: results.filter((entry) => entry.status === 'live').length,
-      partialScopes: results.filter((entry) => entry.status === 'partial').length,
-      candidateCount: results.reduce((total, entry) => total + Number(entry.candidateCount || 0), 0),
-      results,
+      ...summarizeDiscoveryResults(results),
+      writtenNews: writtenCoverage?.coverage || null,
+      writtenNewsError: writtenCoverageError,
     };
 
     updateWorkerRuntimeStatus(db, DISCOVERY_WORKER_NAME, {
       loop_mode: loopMode,
-      last_status: 'success',
+      last_status: summary.status,
       last_completed_at: new Date().toISOString(),
       heartbeat_at: new Date().toISOString(),
       last_summary_json: JSON.stringify(summary),
-      last_error: '',
+      last_error: summary.message,
     });
     return summary;
   } catch (error) {
@@ -212,4 +244,7 @@ module.exports = {
   runDiscoveryCycle,
   runContinuousLoop,
   startContinuousLoop,
+  __test__: {
+    summarizeDiscoveryResults,
+  },
 };

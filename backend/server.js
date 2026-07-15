@@ -44,8 +44,17 @@ const {
   selectLatestOfficialReleaseAlerts,
 } = require('./src/services/alertRadarService');
 const {
+  DIRECT_LATEST_RELEASE_COMPANIES,
+  isDirectOfficialLabReleaseAlert,
+  isPartnerMarketingNewsItem,
+  isPlatformAvailabilityNewsItem,
+  selectDistinctDirectEvents,
+  isVideoOnlyNewsItem,
+} = require('./src/services/directFeedQualityService');
+const {
   getDiscoveryStatus,
   refreshDiscoveryForScope,
+  sanitizeUndatedRadarDerivedContent,
 } = require('./src/services/feedDiscoveryService');
 const {
   refreshPriorityAlertCache,
@@ -173,7 +182,7 @@ const feedCache = new Map();
 const chatRateLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 20 });
 const feedRefreshRateLimiter = createRateLimiter({ windowMs: 5 * 60 * 1000, max: 3 });
 const newsBriefRefreshRateLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 2 });
-const PRIMARY_AI_RELEASE_COMPANIES = ['anthropic', 'openai', 'google', 'xai', 'meta', 'microsoft', 'mistral', 'amazon', 'hugging_face'];
+const PRIMARY_AI_RELEASE_COMPANIES = DIRECT_LATEST_RELEASE_COMPANIES;
 // Default companies used when frontend sends no company filter — matches Goal-file primary vendors
 const DEFAULT_RELEASE_WATCH_COMPANIES = [...PRIMARY_AI_RELEASE_COMPANIES];
 const STRICT_META_RUNTIME = ['1', 'true', 'yes', 'on'].includes(String(process.env.META_STRICT || '').toLowerCase())
@@ -275,6 +284,7 @@ function resolveSqliteDatabasePath() {
 const db = new Database(resolveSqliteDatabasePath());
 db.pragma(isServerlessRuntime() ? 'journal_mode = DELETE' : 'journal_mode = WAL');
 ensureSqliteIdealState(db);
+sanitizeUndatedRadarDerivedContent(db);
 templateService.ensureTables(db);
 templateRankingService.ensureContentAnalysisColumns(db);
 valueHierarchyService.ensureTables(db);
@@ -422,13 +432,13 @@ function buildSourceId(platform, name) {
 }
 
 function normalizeDate(value) {
-  if (!value) return new Date().toISOString();
+  if (!value) return null;
   try {
     const d = new Date(value);
-    if (isNaN(d.getTime())) return new Date().toISOString();
+    if (isNaN(d.getTime())) return null;
     return d.toISOString();
   } catch (e) {
-    return new Date().toISOString();
+    return null;
   }
 }
 
@@ -985,13 +995,20 @@ async function refreshBestFeedForRequest(request, templateState, options = {}) {
 
 async function refreshLiveFeedInputsForRequest(request, templateState, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 12000);
-  const refreshTasks = Promise.allSettled([
+  const refreshTasks = [
     ensureWrittenNewsCoverage(db, { force: Boolean(options.force) }),
-    refreshBestFeedForRequest(request, templateState, { force: Boolean(options.force) }),
-  ]);
+  ];
+
+  // The direct Latest News screen is built from written sources and radar alerts.
+  // Do not hold it behind unrelated YouTube/discovery work on a cold start.
+  if (options.includeDiscovery !== false) {
+    refreshTasks.push(
+      refreshBestFeedForRequest(request, templateState, { force: Boolean(options.force) })
+    );
+  }
 
   return Promise.race([
-    refreshTasks,
+    Promise.allSettled(refreshTasks),
     new Promise((resolve) => setTimeout(() => resolve([{ status: 'timed_out' }]), timeoutMs)),
   ]);
 }
@@ -1040,10 +1057,6 @@ function pickLatestNewsDate(item = {}) {
     || item.published_at
     || item.publishDate
     || item.publish_date
-    || item.createdAt
-    || item.created_at
-    || item.detectedAt
-    || item.timestamp
     || '';
 }
 
@@ -1308,7 +1321,7 @@ function hasDirectRegionalSignal(row = {}) {
 }
 
 function getDirectNewsDate(row = {}) {
-  return row.publish_date || row.created_at || new Date().toISOString();
+  return row.publish_date || '';
 }
 
 function computeDirectNewsScore(row = {}) {
@@ -1346,6 +1359,8 @@ function computeDirectNewsScore(row = {}) {
     && DIRECT_AI_FIRST_PARTY_SOURCE_PATTERN.test(sourceText);
   const namedFrontierRelease = /\b(fable|mythos|opus|sonnet|gpt|gemini|grok|llama|mistral)\s*[- ]?\d+(?:\.\d+)?\b/i.test(text);
   const lowSignal = DIRECT_NEWS_LOW_SIGNAL_PATTERN.test(text);
+  const partnerMarketing = isPartnerMarketingNewsItem(row);
+  const platformAvailability = isPlatformAvailabilityNewsItem(row);
 
   let score = 0;
   if (aiToolSignal) score += 72;
@@ -1361,6 +1376,8 @@ function computeDirectNewsScore(row = {}) {
   score += recencyScore * 16;
   score -= distractionRisk * 22;
   if (lowSignal) score -= 55;
+  if (partnerMarketing) score -= 90;
+  if (platformAvailability && !firstPartyAiRelease) score -= 42;
   if (policyOrResearch && !directToolTitle) score -= 42;
   if (googleNewsWrapper) score -= 58;
   if (channelType === 'socialvideo' && !firstPartyAiRelease && !regionalSignal) score -= 34;
@@ -1386,7 +1403,7 @@ function pickOfficialReleaseThumbnail(alert = {}) {
 
 function normalizeOfficialReleaseAlert(alert = {}, index = 0, publishedAt = '') {
   const thumbnail = pickOfficialReleaseThumbnail(alert);
-  const normalizedPublishedAt = publishedAt || pickLatestNewsDate(alert) || new Date().toISOString();
+  const normalizedPublishedAt = publishedAt || pickLatestNewsDate(alert) || '';
 
   return {
     ...alert,
@@ -1437,18 +1454,23 @@ function buildDirectLatestNews(db, officialReleaseAlerts = []) {
     FROM content_items c
     LEFT JOIN sources s ON s.id = c.source_id
     WHERE c.title IS NOT NULL AND TRIM(c.title) <> ''
-      AND datetime(COALESCE(c.publish_date, c.created_at)) >= datetime('now', '-3 days')
-    ORDER BY datetime(COALESCE(c.publish_date, c.created_at)) DESC, c.created_at DESC
+      AND c.publish_date IS NOT NULL
+      AND datetime(c.publish_date) >= datetime('now', '-3 days')
+    ORDER BY datetime(c.publish_date) DESC, c.created_at DESC
     LIMIT 220
   `).all();
 
-  const releaseItems = (officialReleaseAlerts || []).filter(isVisibleFreshNewsItem).slice(0, 12).map((alert, index) => {
-    const publishedAt = pickLatestNewsDate(alert) || new Date().toISOString();
-    return {
-      ...normalizeOfficialReleaseAlert(alert, index, publishedAt),
-      directNewsScore: 360,
-    };
-  });
+  const releaseItems = (officialReleaseAlerts || [])
+    .filter(isVisibleFreshNewsItem)
+    .filter(isDirectOfficialLabReleaseAlert)
+    .slice(0, 12)
+    .map((alert, index) => {
+      const publishedAt = pickLatestNewsDate(alert);
+      return {
+        ...normalizeOfficialReleaseAlert(alert, index, publishedAt),
+        directNewsScore: 360,
+      };
+    });
 
   const scoredRows = rows
     .map((row) => ({ row, score: computeDirectNewsScore(row) }))
@@ -1457,6 +1479,7 @@ function buildDirectLatestNews(db, officialReleaseAlerts = []) {
       const title = String(row.title || '');
       const source = String(row.source_name || '');
       const channelType = String(row.channel_type || '').toLowerCase();
+      const contentType = String(row.content_type || '').toLowerCase();
       const publishedTime = Date.parse(getDirectNewsDate(row));
       const ageHours = Number.isFinite(publishedTime)
         ? Math.max(0, (Date.now() - publishedTime) / 36e5)
@@ -1470,6 +1493,8 @@ function buildDirectLatestNews(db, officialReleaseAlerts = []) {
       const firstPartySource = DIRECT_AI_FIRST_PARTY_SOURCE_PATTERN.test(source);
       const googleNewsWrapper = isGoogleNewsWrapperUrl(row.url);
       if (ageHours > MAX_VISIBLE_NEWS_AGE_HOURS) return false;
+      if (isVideoOnlyNewsItem({ channelType, contentType, url: row.url })) return false;
+      if (isPartnerMarketingNewsItem({ title, summary: row.summary, source })) return false;
       const staleWrapperOrSocial = ageHours > MAX_VISIBLE_NEWS_AGE_HOURS && (googleNewsWrapper || channelType === 'socialvideo');
       const staleNonOfficial = ageHours > MAX_VISIBLE_NEWS_AGE_HOURS && !regional && !firstPartySource;
       if (googleNewsWrapper && aiTool && !regional) return false;
@@ -1487,6 +1512,11 @@ function buildDirectLatestNews(db, officialReleaseAlerts = []) {
       const topics = parseJsonArray(row.topic_tags_json).map((entry) => String(entry || '').trim()).filter(Boolean);
       const regional = hasDirectRegionalSignal(row);
       const aiTool = isLatestAiToolCandidate({ title: row.title, summary: row.summary, source: row.source_name });
+      const platformAvailability = isPlatformAvailabilityNewsItem({
+        title: row.title,
+        summary: row.summary,
+        source: row.source_name,
+      });
       const officialAiRelease = aiTool
         && DIRECT_AI_HIGH_SIGNAL_TITLE_PATTERN.test(String(row.title || ''))
         && DIRECT_AI_FIRST_PARTY_SOURCE_PATTERN.test(String(row.source_name || ''));
@@ -1502,7 +1532,9 @@ function buildDirectLatestNews(db, officialReleaseAlerts = []) {
         publishDate: publishedAt,
         summary: row.summary || '',
         reason: aiTool
-          ? 'Relevant AI tool or model update.'
+          ? platformAvailability
+            ? 'Tracked AI platform availability update.'
+            : 'Relevant AI tool or model update.'
           : regional
             ? 'Urgent regional update.'
             : 'Relevant trusted news update.',
@@ -1517,13 +1549,17 @@ function buildDirectLatestNews(db, officialReleaseAlerts = []) {
       };
     });
 
-  return attachFeedRankings(dedupeLatestNewsItems([...releaseItems, ...scoredRows])
+  const sorted = dedupeLatestNewsItems([...releaseItems, ...scoredRows])
     .sort((left, right) => {
       const scoreDiff = Number(right.directNewsScore || 0) - Number(left.directNewsScore || 0);
       if (scoreDiff !== 0) return scoreDiff;
       return compareLatestNewsItems(left, right);
-    })
-    .slice(0, 16));
+    });
+
+  return attachFeedRankings(selectDistinctDirectEvents(sorted, {
+    maxItems: 12,
+    maxRegionalItems: 3,
+  }));
 }
 
 function buildDirectFeedPayload({ db, discoveryStatus, writtenCoverage, officialReleaseAlerts }) {
@@ -1644,26 +1680,44 @@ async function refreshPrivateMessengerPushEvidence(request) {
   }
 }
 
-async function getLiveRadarAlertCountForReadiness() {
-  const payload = await getPriorityAlertsWithTimeout(9000);
+async function getLiveRadarAlertCountForReadiness(timeoutMs = 2500) {
+  const payload = await getPriorityAlertsWithTimeout(timeoutMs);
   return Array.isArray(payload?.alerts) ? payload.alerts.length : 0;
 }
 
-fastify.get('/api/v1/readiness', async (request) => {
-  await refreshGoogleAuthProbeForReadiness(request);
-  await refreshPrivateMessengerPushEvidence(request);
+async function hydrateRemoteWorkersForReadiness(request, timeoutMs = 2500) {
   try {
     const remoteWorkers = await supabaseRuntimeStore.listWorkerStatuses([
       'best_feed_discovery',
       'priority_alert_dispatch',
-    ]);
+    ], { timeoutMs });
     for (const worker of remoteWorkers || []) {
       updateWorkerRuntimeStatus(db, worker.worker_name, worker);
     }
   } catch (error) {
     request.log.warn({ err: error }, 'Could not hydrate remote worker readiness');
   }
-  const priorityRadarAlertCount = await getLiveRadarAlertCountForReadiness();
+}
+
+async function refreshReadinessEvidence(request, { includeRemoteWorkers = false } = {}) {
+  const tasks = [
+    refreshGoogleAuthProbeForReadiness(request),
+    refreshPrivateMessengerPushEvidence(request),
+    getLiveRadarAlertCountForReadiness(),
+  ];
+
+  if (includeRemoteWorkers) {
+    tasks.push(hydrateRemoteWorkersForReadiness(request));
+  }
+
+  const results = await Promise.all(tasks);
+  return Math.max(0, Number(results[2] || 0));
+}
+
+fastify.get('/api/v1/readiness', async (request) => {
+  const priorityRadarAlertCount = await refreshReadinessEvidence(request, {
+    includeRemoteWorkers: true,
+  });
   const privateMessages = buildPrivateMessagingReadiness({ db, user: request.user });
   const readiness = buildSystemReadiness({
     db,
@@ -1680,9 +1734,7 @@ fastify.get('/api/v1/readiness', async (request) => {
 });
 
 fastify.get('/api/v1/readiness/vision', async (request) => {
-  await refreshGoogleAuthProbeForReadiness(request);
-  await refreshPrivateMessengerPushEvidence(request);
-  const priorityRadarAlertCount = await getLiveRadarAlertCountForReadiness();
+  const priorityRadarAlertCount = await refreshReadinessEvidence(request);
   const privateMessages = buildPrivateMessagingReadiness({ db, user: request.user });
   const readiness = buildVisionReadiness({
     db,
@@ -1700,8 +1752,7 @@ fastify.get('/api/v1/readiness/vision', async (request) => {
 });
 
 fastify.get('/api/v1/readiness/activation', async (request) => {
-  await refreshGoogleAuthProbeForReadiness(request);
-  await refreshPrivateMessengerPushEvidence(request);
+  await refreshReadinessEvidence(request);
   const privateMessages = buildPrivateMessagingReadiness({ db, user: request.user });
   const readiness = buildActivationReadiness({
     db,
@@ -1975,15 +2026,28 @@ fastify.get('/api/v1/feed', async (request, reply) => {
       feedCache.delete(feedCacheKey);
       writtenNewsBriefCache.delete(userId);
       refreshMode = 'forced';
-      refreshResults = await refreshLiveFeedInputsForRequest(request, templateState, { force: true, timeoutMs: 14000 });
+      refreshResults = await refreshLiveFeedInputsForRequest(request, templateState, {
+        force: true,
+        timeoutMs: 14000,
+        includeDiscovery: !useDirectFeed,
+      });
     }
 
     let discoveryStatus = getDiscoveryStatus(db, request.user?.id || '');
     let writtenCoverage = getWrittenNewsCoverageState(db);
 
-    if (!forceRefresh && !visualize && (discoveryStatus?.totalItems || 0) === 0 && (writtenCoverage?.article_count || 0) === 0) {
+    const writtenCoverageNeedsRefresh = (writtenCoverage?.article_count || 0) === 0
+      || Boolean(writtenCoverage?.latest_article_is_stale)
+      || ((writtenCoverage?.feed_count || 0) > 0 && (writtenCoverage?.reachable_feed_count || 0) === 0);
+    const discoveryNeedsRefresh = !useDirectFeed && (discoveryStatus?.totalItems || 0) === 0;
+
+    if (!forceRefresh && !visualize && (discoveryNeedsRefresh || writtenCoverageNeedsRefresh)) {
       refreshMode = 'automatic';
-      refreshResults = await refreshLiveFeedInputsForRequest(request, templateState, { force: false, timeoutMs: 7000 });
+      refreshResults = await refreshLiveFeedInputsForRequest(request, templateState, {
+        force: false,
+        timeoutMs: 7000,
+        includeDiscovery: !useDirectFeed,
+      });
       discoveryStatus = getDiscoveryStatus(db, request.user?.id || '');
       writtenCoverage = getWrittenNewsCoverageState(db);
     }

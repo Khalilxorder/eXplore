@@ -18,6 +18,15 @@ function isConfigured() {
   return Boolean(config.url && config.key);
 }
 
+function buildRequestSignal(timeoutMs) {
+  if (typeof AbortSignal === 'undefined' || typeof AbortSignal.timeout !== 'function') {
+    return undefined;
+  }
+
+  const normalizedTimeoutMs = Math.max(250, Number(timeoutMs || 0));
+  return normalizedTimeoutMs > 0 ? AbortSignal.timeout(normalizedTimeoutMs) : undefined;
+}
+
 async function request(tablePath, options = {}) {
   const config = getConfig();
   if (!config.url || !config.key) {
@@ -34,6 +43,7 @@ async function request(tablePath, options = {}) {
       ...(options.prefer ? { Prefer: options.prefer } : {}),
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    signal: options.signal || buildRequestSignal(options.timeoutMs),
   });
 
   if (!response.ok) {
@@ -77,13 +87,13 @@ async function upsertWorkerStatus(workerName, changes = {}) {
   return rows?.[0] || null;
 }
 
-async function listWorkerStatuses(workerNames = []) {
+async function listWorkerStatuses(workerNames = [], options = {}) {
   if (!isConfigured()) return [];
   const names = [...new Set(workerNames.map((name) => String(name || '').trim()).filter(Boolean))];
   const filter = names.length
     ? `&worker_name=in.(${names.map((name) => encodeURIComponent(name)).join(',')})`
     : '';
-  return request(`worker_runtime_status?select=*${filter}`) || [];
+  return request(`worker_runtime_status?select=*${filter}`, options) || [];
 }
 
 function mapAlert(alert = {}) {

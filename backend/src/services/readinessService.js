@@ -508,12 +508,14 @@ function buildSurfaceReadiness(db, user = null, sections = {}) {
       article_count: writtenItems,
     },
     explore_feed: {
-      status: discoveryCandidateCount > 0
+      status: discoveryStatus === 'live'
         ? 'live'
-        : (totalContentItems > 0 ? 'partial' : 'unavailable'),
-      message: discoveryCandidateCount > 0
-        ? 'eXplore feed is using ranked discovery candidates.'
-        : totalContentItems > 0
+        : (discoveryStatus === 'partial' || totalContentItems > 0 ? 'partial' : 'unavailable'),
+      message: discoveryStatus === 'live'
+        ? 'eXplore feed is using fresh ranked discovery candidates from healthy configured sources.'
+        : discoveryCandidateCount > 0
+          ? 'eXplore has fresh ranked candidates, but some configured sources are stale or unavailable.'
+          : totalContentItems > 0
           ? 'eXplore feed has indexed content, but Best Feed discovery is still partial.'
           : 'eXplore feed has no indexed content yet.',
       content_count: totalContentItems,
@@ -528,12 +530,14 @@ function buildSurfaceReadiness(db, user = null, sections = {}) {
       candidate_count: discoveryCandidateCount,
     },
     search: {
-      status: discoveryCandidateCount > 0
+      status: discoveryStatus === 'live'
         ? 'live'
-        : (totalContentItems > 0 ? 'partial' : 'unavailable'),
-      message: discoveryCandidateCount > 0
-        ? 'Search runs against indexed and ranked content.'
-        : totalContentItems > 0
+        : (discoveryStatus === 'partial' || totalContentItems > 0 ? 'partial' : 'unavailable'),
+      message: discoveryStatus === 'live'
+        ? 'Search runs against fresh indexed and ranked content.'
+        : discoveryCandidateCount > 0
+          ? 'Search has fresh indexed content, but source coverage is still partial.'
+          : totalContentItems > 0
           ? 'Search has indexed content, but discovery breadth is still partial.'
           : 'Search has no indexed corpus yet.',
       indexed_count: totalContentItems,

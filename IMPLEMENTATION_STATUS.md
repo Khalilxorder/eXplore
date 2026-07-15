@@ -1,6 +1,6 @@
 # eXplore Implementation Status
 
-Updated: 2026-07-13
+Updated: 2026-07-15
 
 This file tracks **BUILD_SPEC** and **PROJECT_PLAN** completion for the current checkout.
 Historical aspirational engine checklist items that are already covered by live services/tests are marked complete.
@@ -14,6 +14,11 @@ Historical aspirational engine checklist items that are already covered by live 
 - [x] CQ-5 Scorer breakdown honesty (`cap≤N` labels)
 - [x] CQ-6 Visual token drift reduced on Home / Opportunities (semantic purple retained)
 - [x] CQ-7 Melodiak pagination loop present
+- [x] CQ-8 Canonical backend test runner ignores Windows ` (1).test.js` duplicates
+- [x] CQ-9 Latest-news visibility capped at 72 hours across Home feed paths
+- [x] CQ-10 Discovery candidates older than 72 hours hidden/stale
+- [x] CQ-11 Gemini multi-key failover + request timeout + disabled-key cool-down
+- [x] CQ-12 Verify lock + `scripts/run-verify.mjs` single-pipeline runner
 
 ## Feature modules (BUILD_SPEC order)
 
@@ -36,33 +41,41 @@ Historical aspirational engine checklist items that are already covered by live 
 - [x] Phase 5 — Opportunities integration (jobs/scholarships APIs, freshness, voice flow)
 - [x] Phase 6 — Gemini pool hardening (rotation tests, pool parser, safe diagnostics)
 - [x] Phase 7 — Verification (lint, backend tests, frontend verifiers, build, release contract)
+- [x] Phase 8 — Life Directed Intelligence spine (contract, topics, Source Web, cycle, explanations)
+- [x] Phase 9 — Feed reliability finalize (72h news age, discovery health, YouTube key rotation)
 
 ## Final product contract areas
 
 | Area | Status | Proof |
 |---|---|---|
-| News | Verified locally | `npm run test:news-page` / frontend verifiers |
+| News | Verified locally (72h max visible age) | `npm run test:news-page` / frontend verifiers |
 | Notifications | Backend verified; physical FCM device proof external | push + radar tests |
 | Messages | UI + schema verified | private messaging verifiers/tests |
 | You / Profile | Hierarchy + mode verified | hierarchy tests |
 | Rules | Template system verified | template-system tests |
 | Sources | Status/packs verified | readiness + sourcePacks tests |
-| YouTube | Service verified | youtubeService tests |
+| YouTube | Service verified (key rotation + public fallback) | youtubeService tests |
 | Music / Xperience | Verified | xSuite + music tests |
 | Shared Experience | Verified | shared experience tests |
 | Jobs / Scholarships | Service verified | opportunities tests |
+| Intelligence cycle | Verified | personalIntelligenceCycle tests |
 
 ## Remaining external / human gates (not code blockers)
 
-1. Free more disk space before large Android rebuilds (currently ~4 GB free).
-2. Physical Android: notification permission, FCM delivery, deep links.
-3. Live OAuth completion for Gmail/Meta when keys are present.
-4. Hosted Supabase schema parity with full local SQLite intelligence tables.
-5. Authenticated release smoke with a real bearer token.
+1. Physical Android: notification permission, FCM delivery, deep links on a real device.
+2. Live OAuth completion for Gmail/Meta when keys are present.
+3. Hosted Supabase apply of `20260713_intelligence_spine.sql` and schema parity with local SQLite.
+4. Authenticated release smoke with a real bearer token.
+5. Optional: rebuild signed APK/AAB after this finalize (web+Android assets now aligned).
 
-## Last verification snapshot
+## Last verification snapshot (2026-07-15 finalize)
 
+- Full pipeline: `npm run verify` green (lint, frontend, backend, build, android asset sync, news-page, smoke, release-contract)
 - Frontend static verifiers: pass
-- Backend tests: 218/218 pass
-- ESLint errors: 0 (quiet)
-- Definition of local-done: BUILD_SPEC modules + CQ tasks implemented and covered by automated proof
+- Backend tests: 244/244 pass
+- ESLint errors: 0 (warnings only)
+- Production build: pass — `explore-20260715200106-ededbd6a`
+- Android web assets: synced to same build id (verify auto-copies after build)
+- News-page verifier: pass (72h visibility, images, priority, scientist tool)
+- Runtime smoke: pass (anonymous protected routes + official-releases)
+- Definition of local-done: BUILD_SPEC modules + LDI spine + feed reliability fixes covered by automated proof

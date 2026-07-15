@@ -18,11 +18,11 @@ const isoHoursAgo = (hours) => new Date(Date.now() - (hours * 60 * 60 * 1000)).t
 test('keeps the last valid radar cache when a refresh temporarily returns nothing', () => {
   assert.equal(shouldKeepCachedAlerts([], {
     checkedAt: Date.now() - 60_000,
-    alerts: [{ id: 'claude-opus-4-8' }],
+    alerts: [{ id: 'claude-opus-4-8', publishedAt: isoHoursAgo(1) }],
   }), true);
   assert.equal(shouldKeepCachedAlerts([{ id: 'gpt-next' }], {
     checkedAt: Date.now() - 60_000,
-    alerts: [{ id: 'claude-opus-4-8' }],
+    alerts: [{ id: 'claude-opus-4-8', publishedAt: isoHoursAgo(1) }],
   }), false);
   assert.equal(shouldKeepCachedAlerts([], {
     checkedAt: 0,
@@ -226,6 +226,26 @@ test('selects fresh company-scoped official releases and skips stale or research
   });
 
   assert.deepEqual(alerts.map((alert) => alert.id), ['anthropic-new']);
+});
+
+test('selectLatestOfficialReleaseAlerts rejects undated releases instead of treating discovery time as publication time', () => {
+  const alerts = selectLatestOfficialReleaseAlerts([
+    {
+      id: 'undated-release',
+      category: 'ai',
+      title: 'Anthropic launches Claude with API availability',
+      official_source: true,
+      release_watch_company: 'anthropic',
+      release_watch_signal: 'official_release',
+      release_watch_company_label: 'Anthropic',
+      release_classification: 'model_release',
+      score: 95,
+      seenAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  ], { companies: ['anthropic'] });
+
+  assert.deepEqual(alerts, []);
 });
 
 test('keeps model releases and drops newer general official coverage', () => {

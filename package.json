@@ -3,7 +3,7 @@
     "version":  "0.1.0",
     "private":  true,
     "engines":  {
-                    "node":  "22.x"
+                    "node":  ">=22 <25"
                 },
     "scripts":  {
                     "dev":  "powershell -ExecutionPolicy Bypass -File scripts/run-local-stack.ps1",
@@ -19,7 +19,7 @@
                     "test:live-messaging":  "node scripts/verify-live-private-messaging.mjs",
                     "test:backend":  "node scripts/run-backend-tests.mjs",
                     "smoke:runtime":  "node scripts/verify-runtime.mjs",
-                    "verify":  "npm run lint \u0026\u0026 npm run test:frontend \u0026\u0026 npm run test:backend \u0026\u0026 npm run build \u0026\u0026 npm run test:news-page \u0026\u0026 npm run smoke:runtime \u0026\u0026 node scripts/verify-release-contract.mjs",
+                    "verify":  "node scripts/run-verify.mjs",
                     "test:release":  "node scripts/verify-release-contract.mjs",
                     "verify:product":  "node scripts/verify-product.mjs",
                     "scholarships:official":  "npm --prefix backend run scholarships:official",

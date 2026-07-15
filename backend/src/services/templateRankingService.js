@@ -115,7 +115,7 @@ function computePublishRecencyScore(value) {
 }
 
 function getRowPublishedTime(row = {}) {
-  const parsed = Date.parse(row.publish_date || row.published_at || row.publishedAt || row.date || row.created_at || row.createdAt || '');
+  const parsed = Date.parse(row.publish_date || row.published_at || row.publishedAt || row.date || '');
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
@@ -1222,8 +1222,11 @@ function loadDiscoveryRows(db, userId = '', limit = 120) {
       FROM feed_candidates fc
       JOIN content_items c ON c.id = fc.content_id
       LEFT JOIN sources s ON s.id = c.source_id
-      WHERE fc.scope_key = ? AND fc.stale = 0
-      ORDER BY fc.overall_score DESC, datetime(COALESCE(fc.published_at, fc.updated_at, fc.created_at)) DESC
+      WHERE fc.scope_key = ?
+        AND fc.stale = 0
+        AND fc.published_at IS NOT NULL
+        AND datetime(fc.published_at) >= datetime('now', '-3 days')
+      ORDER BY fc.overall_score DESC, datetime(fc.published_at) DESC
       LIMIT ?
     `).all(getDiscoveryScopeKey(userId), Math.max(1, Math.min(Number(limit) || 120, 240)))
       .map((row) => ({
@@ -1278,8 +1281,9 @@ async function buildTemplateDrivenFeed(db, templateState, options = {}) {
     SELECT c.*, s.name AS source_name, s.trust_tier AS source_trust_tier
     FROM content_items c
     LEFT JOIN sources s ON s.id = c.source_id
-    WHERE datetime(COALESCE(c.publish_date, c.created_at)) >= datetime('now', '-3 days')
-    ORDER BY COALESCE(c.publish_date, c.created_at) DESC, c.created_at DESC
+    WHERE c.publish_date IS NOT NULL
+      AND datetime(c.publish_date) >= datetime('now', '-3 days')
+    ORDER BY c.publish_date DESC, c.created_at DESC
     LIMIT ?
   `).all(Number(options.scanLimit) || 500);
   const discoveryRows = loadDiscoveryRows(db, options.scopeUserId || '', options.discoveryLimit || 140);

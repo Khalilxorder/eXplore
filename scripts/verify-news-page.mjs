@@ -82,7 +82,14 @@ for (const [screen, label] of expectedTabs) {
 
 assertMarker(home, 'function normalizeEmergencySnapshotItems()', 'Latest news must build a nonblank emergency snapshot.');
 assertMarker(home, 'emergencySnapshot: true', 'Emergency snapshot items must be marked explicitly.');
-assertMarker(home, /if\s*\(item\?\.emergencySnapshot\)\s*{\s*return true;/, 'Emergency snapshot items must bypass stale-date filtering.');
+assertMarker(home, 'const MAX_VISIBLE_NEWS_AGE_HOURS = 72;', 'Latest news must use one explicit 72-hour visibility limit.');
+assertMarker(home, 'isRecentEnough(item.date, MAX_VISIBLE_NEWS_AGE_HOURS)', 'Every rendered latest-news item must meet the 72-hour visibility limit.');
+if (/if\s*\(item\?\.emergencySnapshot\)\s*\{\s*return true;/u.test(home)) {
+  throw new Error('Emergency snapshots must not bypass the latest-news freshness limit.');
+}
+if (/isRecentEnough\(item\.date,\s*24\s*\*\s*(?:5|7|10)\)/u.test(home)) {
+  throw new Error('Latest news must not keep category-specific items beyond the shared 72-hour limit.');
+}
 assertMarker(home, 'const [loading, setLoading] = useState(false);', 'Latest news must not boot into a blank skeleton-only state.');
 assertMarker(home, 'initialSnapshotItems', 'Latest news must seed the first screen with fallback items.');
 assertMarker(home, /applyEmergencySnapshot[\s\S]*?const snapshotItems = filterLatestNewsItems\(normalizeEmergencySnapshotItems\(\)\)/, 'Emergency snapshot must use normalized fallback items.');

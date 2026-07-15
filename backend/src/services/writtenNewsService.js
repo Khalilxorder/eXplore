@@ -37,7 +37,7 @@ const AI_TOOL_FEED_DEFINITIONS = [
   { url: 'https://openai.com/news/rss.xml', label: 'OpenAI official RSS' },
   { url: 'https://blog.google/technology/ai/rss/', label: 'Google AI official RSS' },
   { url: 'https://huggingface.co/blog/feed.xml', label: 'Hugging Face blog RSS' },
-  { url: 'https://blogs.microsoft.com/ai/feed/', label: 'Microsoft AI blog RSS' },
+  { url: 'https://blogs.microsoft.com/blog/tag/ai/feed/', label: 'Microsoft AI blog RSS' },
   { url: 'https://aws.amazon.com/blogs/machine-learning/feed/', label: 'AWS Machine Learning RSS' },
   { url: 'https://github.blog/ai-and-ml/feed/', label: 'GitHub AI and ML RSS' },
   { url: buildGoogleNewsSiteFeed('anthropic.com/news', AI_TOOL_SIGNAL_QUERY), label: 'Anthropic official via Google News RSS' },
@@ -868,7 +868,10 @@ function insertArticle(db, entry) {
   if (existing) {
     db.prepare(`
       UPDATE content_items
-      SET trust_score = CASE
+      SET source_id = ?,
+          content_type = 'article',
+          channel_type = 'written',
+          trust_score = CASE
             WHEN COALESCE(trust_score, 0) < ? THEN ?
             ELSE trust_score
           END,
@@ -893,6 +896,7 @@ function insertArticle(db, entry) {
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
+      sourceId,
       sourceTrustScore,
       sourceTrustScore,
       nextThumbnailUrl || null,

@@ -1,9 +1,8 @@
 'use strict';
 
-const { getPriorityAlerts } = require('./alertRadarService');
+const { getPriorityAlerts, isAlertWithinVisibleWindow } = require('./alertRadarService');
 
 const MAX_FEED_ITEMS = 80;
-const RETENTION_DAYS = 120;
 const REVIEW_RETENTION_DAYS = 120;
 
 function normalizeTitle(value = '') {
@@ -207,8 +206,10 @@ function filterAlertsByCategories(alerts = [], categories = {}) {
 function pruneOldAlerts(db) {
   db.prepare(`
     DELETE FROM priority_alerts
-    WHERE COALESCE(published_at, updated_at, created_at) < datetime('now', ?)
-  `).run(`-${RETENTION_DAYS} days`);
+    WHERE published_at IS NULL
+      OR datetime(published_at) < datetime('now', '-3 days')
+      OR datetime(published_at) > datetime('now', '+6 hours')
+  `).run();
 }
 
 function pruneOldReviews(db) {
@@ -219,7 +220,9 @@ function pruneOldReviews(db) {
 }
 
 function persistPriorityAlerts(db, alerts = []) {
-  if (!Array.isArray(alerts) || alerts.length === 0) {
+  const currentAlerts = (Array.isArray(alerts) ? alerts : [])
+    .filter((alert) => isAlertWithinVisibleWindow(alert));
+  if (!currentAlerts.length) {
     return [];
   }
 
@@ -300,9 +303,9 @@ function persistPriorityAlerts(db, alerts = []) {
     }
   });
 
-  transaction(alerts);
+  transaction(currentAlerts);
   pruneOldAlerts(db);
-  return alerts;
+  return currentAlerts;
 }
 
 function persistPriorityAlertReviews(db, reviewLog = []) {
@@ -379,15 +382,13 @@ function listPriorityAlerts(db, userId, options = {}) {
     FROM priority_alerts a
     LEFT JOIN user_alert_states state
       ON state.alert_id = a.id AND state.user_id = ?
-    WHERE COALESCE(a.published_at, a.updated_at, a.created_at) >= datetime('now', '-30 days')
+    WHERE a.published_at IS NOT NULL
+      AND datetime(a.published_at) >= datetime('now', '-3 days')
+      AND datetime(a.published_at) <= datetime('now', '+6 hours')
     ORDER BY
       a.official_source DESC,
       a.score DESC,
-      CASE
-        WHEN a.published_at IS NULL THEN 1
-        ELSE 0
-      END ASC,
-      datetime(COALESCE(a.published_at, a.updated_at, a.created_at)) DESC
+      datetime(a.published_at) DESC
     LIMIT ?
   `).all(userId, queryWindow);
 
@@ -488,9 +489,10 @@ async function refreshPriorityAlertCache(db, options = {}) {
 
   try {
     const payload = await getPriorityAlerts();
-    persistPriorityAlerts(db, payload.alerts || []);
+    const currentAlerts = (payload.alerts || []).filter((alert) => isAlertWithinVisibleWindow(alert));
+    persistPriorityAlerts(db, currentAlerts);
     const reviewCount = persistPriorityAlertReviews(db, payload.reviewLog || []);
-    const liveAlertIds = filterAlertsByCategories(payload.alerts || [], categories)
+    const liveAlertIds = filterAlertsByCategories(currentAlerts, categories)
       .slice(0, limit)
       .map((alert) => alert.id);
 

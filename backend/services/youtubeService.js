@@ -1,7 +1,7 @@
 // YouTube Data Fetcher - production implementation.
 // Uses YouTube Data API v3 for metadata, discovery, and channel lookups.
 const { google } = require('googleapis');
-const { fetchPublicTranscript } = require('../src/services/transcriptService');
+const { fetchPublicTranscript: fetchRawPublicTranscript } = require('../src/services/transcriptService');
 const ContentSourceAdapter = require('../src/services/contentSourceAdapter');
 const embeddingProvider = require('../src/services/embeddingProvider');
 const llmProvider = require('../src/services/llmProvider');
@@ -20,7 +20,18 @@ const YOUTUBE_KEY_COOLDOWN_BASE_MS = {
   default: 5 * 60 * 1000,
 };
 const YOUTUBE_KEY_COOLDOWN_MAX_MS = 6 * 60 * 60 * 1000;
+const PUBLIC_YOUTUBE_REQUEST_TIMEOUT_MS = 15 * 1000;
+const PUBLIC_YOUTUBE_REQUEST_ATTEMPTS = 2;
+const PUBLIC_YOUTUBE_RETRY_DELAY_MS = 200;
+const PUBLIC_YOUTUBE_SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
+const PUBLIC_YOUTUBE_EMPTY_CACHE_TTL_MS = 5 * 60 * 1000;
+const PUBLIC_YOUTUBE_TRANSCRIPT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const PUBLIC_YOUTUBE_UNAVAILABLE_TRANSCRIPT_CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_PUBLIC_YOUTUBE_CACHE_ENTRIES = 400;
 const youtubeKeyCooldowns = new Map();
+const publicYoutubeSearchCache = new Map();
+const publicYoutubeRssCache = new Map();
+const publicYoutubeTranscriptCache = new Map();
 let youtubeRoundRobinCursor = 0;
 
 function isDevMocksEnabled() {
@@ -214,7 +225,134 @@ function isRetryableYouTubeError(error) {
 
   return message.includes('quota')
     || message.includes('rate limit')
-    || message.includes('user rate limit');
+    || message.includes('user rate limit')
+    || message.includes('cooling')
+    || message.includes('fetch failed')
+    || message.includes('network')
+    || message.includes('econnreset')
+    || message.includes('etimedout')
+    || message.includes('eai_again');
+}
+
+function isPublicChannelFallbackError(error) {
+  if (isRetryableYouTubeError(error)) {
+    return true;
+  }
+
+  return String(error?.message || '').toLowerCase().includes('youtube rss fetch failed');
+}
+
+function wait(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(delayMs) || 0)));
+}
+
+function isRetryablePublicYoutubeResponse(response) {
+  const status = Number(response?.status || 0);
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function fetchPublicYoutubeResponse(url, options = {}) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < PUBLIC_YOUTUBE_REQUEST_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PUBLIC_YOUTUBE_REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+
+      if (!isRetryablePublicYoutubeResponse(response) || attempt === PUBLIC_YOUTUBE_REQUEST_ATTEMPTS - 1) {
+        return response;
+      }
+
+      lastError = new Error(`YouTube public fallback failed: HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableYouTubeError(error) || attempt === PUBLIC_YOUTUBE_REQUEST_ATTEMPTS - 1) {
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    await wait(PUBLIC_YOUTUBE_RETRY_DELAY_MS * (attempt + 1));
+  }
+
+  throw lastError || new Error('YouTube public fallback failed.');
+}
+
+function prunePublicYoutubeCache(cache) {
+  const now = Date.now();
+
+  for (const [key, entry] of cache.entries()) {
+    if (!entry?.promise && Number(entry?.expiresAt || 0) <= now) {
+      cache.delete(key);
+    }
+  }
+
+  while (cache.size > MAX_PUBLIC_YOUTUBE_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    cache.delete(oldestKey);
+  }
+}
+
+function cachePublicYoutubeRequest(cache, key, load, resolveTtlMs) {
+  const now = Date.now();
+  const existing = cache.get(key);
+
+  if (existing?.promise) {
+    return existing.promise;
+  }
+
+  if (existing && Object.prototype.hasOwnProperty.call(existing, 'value') && Number(existing.expiresAt || 0) > now) {
+    return Promise.resolve(existing.value);
+  }
+
+  const request = Promise.resolve().then(load);
+  cache.set(key, {
+    promise: request,
+    expiresAt: now + PUBLIC_YOUTUBE_REQUEST_TIMEOUT_MS,
+  });
+
+  request.then(
+    (value) => {
+      cache.set(key, {
+        value,
+        expiresAt: Date.now() + Math.max(1, Number(resolveTtlMs(value)) || PUBLIC_YOUTUBE_EMPTY_CACHE_TTL_MS),
+      });
+      prunePublicYoutubeCache(cache);
+    },
+    () => {
+      const current = cache.get(key);
+      if (current?.promise === request) {
+        cache.delete(key);
+      }
+    }
+  );
+
+  return request;
+}
+
+async function fetchPublicTranscript(videoId) {
+  const normalizedVideoId = String(videoId || '').trim();
+  if (!normalizedVideoId) {
+    return fetchRawPublicTranscript(normalizedVideoId);
+  }
+
+  return cachePublicYoutubeRequest(
+    publicYoutubeTranscriptCache,
+    `transcript:${normalizedVideoId}`,
+    () => fetchRawPublicTranscript(normalizedVideoId),
+    (payload) => payload?.transcriptStatus === 'available'
+      ? PUBLIC_YOUTUBE_TRANSCRIPT_CACHE_TTL_MS
+      : PUBLIC_YOUTUBE_UNAVAILABLE_TRANSCRIPT_CACHE_TTL_MS
+  );
 }
 
 async function executeYouTubeRequest(executor) {
@@ -573,22 +711,37 @@ function parseSearchResultsFromHtml(html = '', maxResults = 5) {
 }
 
 async function searchRecentVideosWithoutApiKey(query, maxResults = 5) {
-  const response = await fetch(
-    `https://www.youtube.com/results?search_query=${encodeURIComponent(String(query || '').trim())}&sp=CAI%253D`,
-    {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; eXploreBot/1.0)',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(`YouTube search fallback failed: HTTP ${response.status}`);
+  const normalizedQuery = String(query || '').trim().replace(/\s+/g, ' ');
+  const targetMaxResults = Math.max(1, Math.min(Number(maxResults) || 5, 10));
+  if (!normalizedQuery) {
+    return [];
   }
 
-  const html = await response.text();
-  return parseSearchResultsFromHtml(html, maxResults);
+  return cachePublicYoutubeRequest(
+    publicYoutubeSearchCache,
+    `search:${normalizedQuery.toLowerCase()}:${targetMaxResults}`,
+    async () => {
+      const response = await fetchPublicYoutubeResponse(
+        `https://www.youtube.com/results?search_query=${encodeURIComponent(normalizedQuery)}&sp=CAI%253D`,
+        {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; eXploreBot/1.0)',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`YouTube search fallback failed: HTTP ${response.status}`);
+      }
+
+      const html = await response.text();
+      return parseSearchResultsFromHtml(html, targetMaxResults);
+    },
+    (results) => Array.isArray(results) && results.length > 0
+      ? PUBLIC_YOUTUBE_SEARCH_CACHE_TTL_MS
+      : PUBLIC_YOUTUBE_EMPTY_CACHE_TTL_MS
+  );
 }
 
 function parseChannelId(input) {
@@ -693,18 +846,33 @@ function parseYoutubeRssFeed(xml = '', channelId = '', maxResults = 5) {
 }
 
 async function fetchRecentChannelVideosViaRss(channelId, maxResults = 5) {
-  const response = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(channelId)}`, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; eXploreBot/1.0)',
+  const normalizedChannelId = String(channelId || '').trim();
+  const targetMaxResults = Math.max(1, Math.min(Number(maxResults) || 5, 10));
+
+  return cachePublicYoutubeRequest(
+    publicYoutubeRssCache,
+    `rss:${normalizedChannelId}:${targetMaxResults}`,
+    async () => {
+      const response = await fetchPublicYoutubeResponse(
+        `https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(normalizedChannelId)}`,
+        {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; eXploreBot/1.0)',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`YouTube RSS fetch failed: HTTP ${response.status}`);
+      }
+
+      const xml = await response.text();
+      return parseYoutubeRssFeed(xml, normalizedChannelId, targetMaxResults);
     },
-  });
-
-  if (!response.ok) {
-    throw new Error(`YouTube RSS fetch failed: HTTP ${response.status}`);
-  }
-
-  const xml = await response.text();
-  return parseYoutubeRssFeed(xml, channelId, maxResults);
+    (results) => Array.isArray(results) && results.length > 0
+      ? PUBLIC_YOUTUBE_SEARCH_CACHE_TTL_MS
+      : PUBLIC_YOUTUBE_EMPTY_CACHE_TTL_MS
+  );
 }
 
 async function searchChannels(query, maxResults = 5) {
@@ -764,17 +932,29 @@ async function resolveChannelInput(input) {
 }
 
 async function fetchRecentChannelVideos(channelId, maxResults = 5) {
-  requireApiKeyForRealUsage();
+  const targetMaxResults = Math.max(1, Math.min(Number(maxResults) || 5, 10));
 
-  const response = await executeYouTubeRequest((youtube) => youtube.search.list({
-    part: ['snippet'],
-    channelId,
-    type: ['video'],
-    order: 'date',
-    maxResults: Math.max(1, Math.min(Number(maxResults) || 5, 10)),
-  }));
+  if (getYouTubeApiKeys().length === 0) {
+    return fetchRecentChannelVideosViaRss(channelId, targetMaxResults);
+  }
 
-  return (response.data.items || []).map(mapSearchVideoItem).filter(Boolean);
+  try {
+    const response = await executeYouTubeRequest((youtube) => youtube.search.list({
+      part: ['snippet'],
+      channelId,
+      type: ['video'],
+      order: 'date',
+      maxResults: targetMaxResults,
+    }));
+
+    return (response.data.items || []).map(mapSearchVideoItem).filter(Boolean);
+  } catch (error) {
+    if (!isRetryableYouTubeError(error)) {
+      throw error;
+    }
+
+    return fetchRecentChannelVideosViaRss(channelId, targetMaxResults);
+  }
 }
 
 async function searchRecentVideos(query, maxResults = 5) {
@@ -1019,26 +1199,21 @@ async function hydrateSearchResults(searchResults = []) {
     return [];
   }
 
-  if (getYouTubeApiKeys().length === 0) {
-    return Promise.all(baseResults.map(async (item) => {
-      const transcriptPayload = item?.transcript || item?.transcriptStatus || item?.transcriptPreview || item?.transcriptSource
-        ? buildTranscriptMetadata(item, item?.description || '')
-        : buildTranscriptMetadata(await fetchPublicTranscript(item.videoId), item?.description || '');
-
-      return {
-        ...item,
-        transcript: transcriptPayload.transcript || '',
-        transcriptStatus: transcriptPayload.transcriptStatus,
-        transcriptSource: transcriptPayload.transcriptSource,
-        transcriptPreview: transcriptPayload.transcriptPreview,
-        transcriptUpdatedAt: transcriptPayload.transcriptUpdatedAt,
-        transcriptProvider: transcriptPayload.transcriptProvider,
-        ingestStatus: transcriptPayload.transcriptStatus === 'available' ? 'ready' : 'partial',
-      };
-    }));
+  if (getYouTubeApiKeys().length === 0 || getYouTubeKeyRotationOrder().length === 0) {
+    return hydratePublicVideoResults(baseResults);
   }
 
-  const details = await fetchVideosByIds(baseResults.map((item) => item.videoId));
+  let details;
+  try {
+    details = await fetchVideosByIds(baseResults.map((item) => item.videoId));
+  } catch (error) {
+    if (!isRetryableYouTubeError(error)) {
+      throw error;
+    }
+
+    return hydratePublicVideoResults(baseResults);
+  }
+
   const detailMap = new Map(details.map((item) => [item.videoId, item]));
 
   return baseResults.map((item) => {
@@ -1076,30 +1251,60 @@ async function resolveChannelByQuery(query) {
 async function fetchRecentVideosByChannel(channelId, options = {}) {
   const maxResults = typeof options === 'object' ? options.maxResults : options;
   const targetMaxResults = maxResults || 5;
+  const fallbackQuery = typeof options === 'object'
+    ? String(options.query || options.channelQuery || options.channelName || '').trim()
+    : '';
 
   try {
     const recent = await fetchRecentChannelVideos(channelId, targetMaxResults);
     return hydrateSearchResults(recent);
   } catch (error) {
-    const allowRssFallback = getYouTubeApiKeys().length === 0 || isRetryableYouTubeError(error);
-    if (!allowRssFallback) {
+    if (!isPublicChannelFallbackError(error)) {
       throw error;
     }
 
-    const rssItems = await fetchRecentChannelVideosViaRss(channelId, targetMaxResults);
-    return Promise.all(rssItems.map(async (item) => {
+    const failedRssAlready = /youtube rss fetch failed/i.test(String(error?.message || ''));
+    if (!failedRssAlready) {
+      try {
+        const rssItems = await fetchRecentChannelVideosViaRss(channelId, targetMaxResults);
+        return hydratePublicVideoResults(rssItems);
+      } catch (rssError) {
+        if (!fallbackQuery) {
+          throw rssError;
+        }
+      }
+    }
+
+    if (!fallbackQuery) {
+      throw error;
+    }
+
+    const searchLimit = Math.min(10, Math.max(targetMaxResults * 2, targetMaxResults));
+    const searchItems = await searchRecentVideosWithoutApiKey(fallbackQuery, searchLimit);
+    const exactChannelItems = searchItems
+      .filter((item) => String(item?.channelId || '').trim() === String(channelId || '').trim())
+      .slice(0, targetMaxResults);
+
+    return hydratePublicVideoResults(exactChannelItems);
+  }
+}
+
+async function hydratePublicVideoResults(items = []) {
+  return Promise.all(items.map(async (item) => {
       const transcriptPayload = buildTranscriptMetadata(
-        await fetchPublicTranscript(item.videoId),
+        item?.transcript || item?.transcriptStatus || item?.transcriptPreview || item?.transcriptSource
+          ? item
+          : await fetchPublicTranscript(item.videoId),
         item?.description || ''
       );
       return {
         ...item,
-        durationSeconds: 0,
-        viewCount: 0,
-        likeCount: 0,
-        commentCount: 0,
-        tags: [],
-        categoryId: '',
+        durationSeconds: Number(item?.durationSeconds || 0),
+        viewCount: Number(item?.viewCount || 0),
+        likeCount: Number(item?.likeCount || 0),
+        commentCount: Number(item?.commentCount || 0),
+        tags: Array.isArray(item?.tags) ? item.tags : [],
+        categoryId: item?.categoryId || '',
         transcript: transcriptPayload.transcript,
         transcriptStatus: transcriptPayload.transcriptStatus,
         transcriptSource: transcriptPayload.transcriptSource,
@@ -1109,7 +1314,6 @@ async function fetchRecentVideosByChannel(channelId, options = {}) {
         ingestStatus: transcriptPayload.transcriptStatus === 'available' ? 'ready' : 'partial',
       };
     }));
-  }
 }
 
 async function searchVideos(query, options = {}) {
@@ -1656,6 +1860,8 @@ exports.__test__ = {
   parseYoutubeRssFeed,
   buildTranscriptMetadata,
   normalizeTranscriptText,
+  searchRecentVideosWithoutApiKey,
+  fetchPublicYoutubeResponse,
   fetchFullTranscript,
   chunkText,
   localAnalyzeCredibility,
@@ -1664,5 +1870,9 @@ exports.__test__ = {
     youtubeKeyCooldowns.clear();
     youtubeRoundRobinCursor = 0;
   },
+  resetPublicYoutubeFallbackCaches: () => {
+    publicYoutubeSearchCache.clear();
+    publicYoutubeRssCache.clear();
+    publicYoutubeTranscriptCache.clear();
+  },
 };
-

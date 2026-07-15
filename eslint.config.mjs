@@ -22,6 +22,13 @@ const eslintConfig = defineConfig([
     "output/**",
     "explore.db",
     "backend/node_modules/**",
+    // Local clutter / accidental copies — never lint as product source
+    "_archive/**",
+    "eXPLORE (1)/**",
+    "StudentApartment/**",
+    "**/* (1).*",
+    "**/* (2).*",
+    "**/(*).*",
   ]),
   {
     files: ["backend/**/*.js", "scripts/**/*.js", "scripts/**/*.mjs"],

@@ -55,8 +55,38 @@ npm-debug.log*
 yarn-debug.log*
 .pnpm-debug.log*
 .verify-*
+.verify.lock
 backend-install.log
 eslint_out.json
+*.log
+verify-*.txt
+verify-*.log
+install-*.txt
+install-*.log
+test-*.txt
+test-*.log
+lint-*.txt
+lint-*.log
+build-*.txt
+build.log
+cache-clean*.txt
+pipeline-report.txt
+smoke-output.txt
+spawn-test.log
+seq-run.log
+single-test.log
+batch-test.txt
+steps-status.txt
+node-version.txt
+openai-install.txt
+npm-install.log
+
+# accidental Windows "Copy of" duplicates
+**/* (1).*
+**/* (2).*
+_archive/
+eXPLORE (1)/
+CODEX_CONVERSATIONS_eXPLORE.md
 
 # env files
 .env*

@@ -21,6 +21,11 @@ const androidBuildMeta = JSON.parse(read('android/app/src/main/assets/public/__e
 
 assert.ok(buildMeta.buildId, 'web build metadata must contain a build id');
 assert.ok(androidBuildMeta.buildId, 'Android asset metadata must contain a build id');
+assert.equal(
+  androidBuildMeta.buildId,
+  buildMeta.buildId,
+  'Android assets must be synced from the same web build before a release can pass.',
+);
 assert.ok(exists('backend/supabase/migrations/20260713_intelligence_spine.sql'), 'intelligence migration must exist');
 assert.match(migration, /enable row level security/i, 'hosted intelligence tables must enable RLS');
 assert.match(migration, /auth\.uid\(\)/i, 'hosted intelligence policies must scope rows to auth.uid');

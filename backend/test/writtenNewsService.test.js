@@ -304,3 +304,56 @@ test('written thumbnail helpers prefer the sharper incoming thumbnail', () => {
     service.__test__.promoteWrittenThumbnailUrl(hiRes),
   );
 });
+
+test('written refresh repairs an existing article that was previously stored as a video channel', async () => {
+  const originalEnv = { ...process.env };
+  const originalFetch = global.fetch;
+  process.env.WRITTEN_NEWS_FEEDS = 'https://repair.example/rss';
+
+  const { service, aiService } = loadWrittenNewsService();
+  const db = createDb();
+  const crypto = require('node:crypto');
+  const url = 'https://repair.example/articles/official-release';
+  const externalId = `article_${crypto.createHash('sha1').update(url).digest('hex').slice(0, 16)}`;
+  const publishDate = new Date(Date.now() - (30 * 60 * 1000)).toISOString();
+
+  db.prepare(`
+    INSERT INTO content_items (
+      id, source_id, external_id, title, url, publish_date, transcript, summary,
+      embedding_json, rarity_score, depth_score, freshness_score, timeless_score,
+      clickbait_score, trust_score, topic_tags_json, content_type, article_body, channel_type
+    ) VALUES (
+      'legacy-article', 'source_radar_legacy', ?, 'Legacy release', ?, ?, '', '', '[]',
+      0.2, 0.2, 0.2, 0.2, 0.2, 0.2, '[]', 'article', '', 'socialVideo'
+    )
+  `).run(externalId, url, publishDate);
+
+  aiService.analyzeContent = async () => null;
+  aiService.generateEmbedding = async () => [];
+  global.fetch = async () => createResponse(`<?xml version="1.0"?>
+    <rss><channel><title>OpenAI</title><item>
+      <title>Official release</title><link>${url}</link><pubDate>${publishDate}</pubDate>
+      <description>Release details.</description>
+    </item></channel></rss>`);
+
+  try {
+    await service.ensureWrittenNewsCoverage(db, { force: true });
+    const row = db.prepare('SELECT source_id, content_type, channel_type FROM content_items WHERE external_id = ?').get(externalId);
+    assert.equal(row.content_type, 'article');
+    assert.equal(row.channel_type, 'written');
+    assert.match(row.source_id, /^src_written_/);
+  } finally {
+    global.fetch = originalFetch;
+    db.close();
+    restoreEnv(originalEnv);
+  }
+});
+
+test('configured sources retain the live Microsoft AI RSS endpoint', () => {
+  const { service } = loadWrittenNewsService();
+  const microsoft = service.getConfiguredFeedDefinitions()
+    .find((definition) => definition.label === 'Microsoft AI blog RSS');
+
+  assert.ok(microsoft);
+  assert.equal(microsoft.url, 'https://blogs.microsoft.com/blog/tag/ai/feed/');
+});

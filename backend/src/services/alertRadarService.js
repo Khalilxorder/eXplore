@@ -5,6 +5,8 @@ const crypto = require('crypto');
 const CACHE_TTL_MS = 60 * 1000;
 const MAX_ITEMS_PER_FEED = 30;
 const MAX_CACHED_ALERTS = 60;
+const MAX_VISIBLE_ALERT_AGE_MS = 3 * 24 * 60 * 60 * 1000;
+const MAX_FUTURE_ALERT_SKEW_MS = 6 * 60 * 60 * 1000;
 const MAX_ITEMS_PER_OFFICIAL_PAGE = 6;
 const GOOGLE_NEWS_BASE = 'https://news.google.com/rss/search';
 const MAX_REVIEW_LOG_ITEMS = 400;
@@ -2446,8 +2448,20 @@ function balanceAlerts(alerts) {
 }
 
 function getAlertPublishedAtMs(alert = {}) {
-  const publishedAt = new Date(alert.publishedAt || alert.seenAt || alert.updatedAt || 0).getTime();
+  // Import/check times are operational metadata, not evidence of publication.
+  // Only an explicit source publication time can make an alert current.
+  const publishedAt = new Date(alert.publishedAt || alert.published_at || '').getTime();
   return Number.isFinite(publishedAt) ? publishedAt : 0;
+}
+
+function isAlertWithinVisibleWindow(alert = {}) {
+  const publishedAtMs = getAlertPublishedAtMs(alert);
+  if (!publishedAtMs) {
+    return false;
+  }
+
+  const ageMs = Date.now() - publishedAtMs;
+  return ageMs <= MAX_VISIBLE_ALERT_AGE_MS && ageMs >= -MAX_FUTURE_ALERT_SKEW_MS;
 }
 
 function isOfficialReleaseAlert(alert = {}) {
@@ -2558,17 +2572,13 @@ function selectLatestOfficialReleaseAlerts(alerts = [], options = {}) {
     options.companies ?? options.company ?? options.releaseWatchCompany ?? []
   );
   const minimumImportance = normalizeReleaseImportance(options.minImportance ?? options.minimumImportance);
-  const MAX_AGE_DAYS = 3;
-  const maxAgeMs = MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
-
   const officialAlerts = dedupeAlerts(
     (Array.isArray(alerts) ? alerts : []).filter((alert) => {
       if (!isOfficialReleaseAlert(alert)) {
         return false;
       }
 
-      const publishedAtMs = getAlertPublishedAtMs(alert);
-      if (publishedAtMs && (Date.now() - publishedAtMs) > maxAgeMs) {
+      if (!isAlertWithinVisibleWindow(alert)) {
         return false;
       }
 
@@ -2741,7 +2751,9 @@ async function collectAlerts() {
     }
   }
 
-  const alerts = balanceAlerts(dedupeAlerts(sortAcceptedAlerts(acceptedAlerts)));
+  const alerts = balanceAlerts(
+    dedupeAlerts(sortAcceptedAlerts(acceptedAlerts.filter((alert) => isAlertWithinVisibleWindow(alert))))
+  );
 
   return {
     alerts: alerts.slice(0, MAX_CACHED_ALERTS),
@@ -2750,7 +2762,14 @@ async function collectAlerts() {
 }
 
 function shouldKeepCachedAlerts(nextAlerts, radar = cachedRadar) {
-  return !nextAlerts.length && Boolean(radar.checkedAt) && radar.alerts.length > 0;
+  return !nextAlerts.length
+    && Boolean(radar.checkedAt)
+    && radar.alerts.some((alert) => isAlertWithinVisibleWindow(alert));
+}
+
+function getVisibleCachedAlerts(radar = cachedRadar) {
+  return (Array.isArray(radar.alerts) ? radar.alerts : [])
+    .filter((alert) => isAlertWithinVisibleWindow(alert));
 }
 
 async function getPriorityAlerts() {
@@ -2758,7 +2777,7 @@ async function getPriorityAlerts() {
   if (cachedRadar.checkedAt && now - cachedRadar.checkedAt < CACHE_TTL_MS) {
     return {
       checkedAt: new Date(cachedRadar.checkedAt).toISOString(),
-      alerts: cachedRadar.alerts,
+      alerts: getVisibleCachedAlerts(cachedRadar),
       reviewLog: [],
       cacheAgeMs: now - cachedRadar.checkedAt,
     };
@@ -2769,7 +2788,7 @@ async function getPriorityAlerts() {
     if (shouldKeepCachedAlerts(payload.alerts)) {
       return {
         checkedAt: new Date(cachedRadar.checkedAt).toISOString(),
-        alerts: cachedRadar.alerts,
+        alerts: getVisibleCachedAlerts(cachedRadar),
         reviewLog: payload.reviewLog || [],
         cacheAgeMs: now - cachedRadar.checkedAt,
       };
@@ -2794,7 +2813,7 @@ async function getPriorityAlerts() {
 
   return {
     checkedAt: new Date(cachedRadar.checkedAt).toISOString(),
-    alerts: cachedRadar.alerts,
+    alerts: getVisibleCachedAlerts(cachedRadar),
     reviewLog: [],
     cacheAgeMs: now - cachedRadar.checkedAt,
   };
@@ -2808,6 +2827,7 @@ module.exports = {
   getDirectRadarFeedDefinitions,
   getPriorityAlerts,
   getRadarReferencePoints,
+  isAlertWithinVisibleWindow,
   isOfficialReleaseAlert,
   matchDirectNotificationRule,
   scoreAiItem,

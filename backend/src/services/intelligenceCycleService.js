@@ -73,6 +73,16 @@ async function runIntelligenceCycle(db, options = {}) {
       push = await dispatchHostedPush(radar.alerts || []);
     }
 
+    const discoveryStatus = discovery?.status || 'success';
+    const runIssues = [];
+    if (discoveryStatus === 'partial') {
+      runIssues.push(discovery?.message || 'One or more configured discovery sources are unavailable.');
+    }
+    if (push.failed > 0) {
+      runIssues.push(`${push.failed} push delivery attempt(s) failed.`);
+    }
+    const runStatus = runIssues.length > 0 ? 'partial' : 'success';
+
     const summary = {
       startedAt,
       completedAt: new Date().toISOString(),
@@ -87,9 +97,13 @@ async function runIntelligenceCycle(db, options = {}) {
         failedFeeds: Number(written?.coverage?.failure_count || 0),
       },
       discovery: {
+        status: discoveryStatus,
         refreshedScopes: Number(discovery?.refreshedScopes || 0),
         candidateCount: Number(discovery?.candidateCount || 0),
         liveScopes: Number(discovery?.liveScopes || 0),
+        partialScopes: Number(discovery?.partialScopes || 0),
+        staleSourceCount: Number(discovery?.staleSourceCount || 0),
+        errorSourceCount: Number(discovery?.errorSourceCount || 0),
       },
       analysis: getAnalysisEvidence(db),
       alerts: {
@@ -102,20 +116,23 @@ async function runIntelligenceCycle(db, options = {}) {
 
     await recordRemoteStatus({
       loop_mode: options.loopMode || 'scheduled',
-      last_status: push.failed > 0 ? 'partial' : 'success',
+      last_status: runStatus,
       last_started_at: startedAt,
       last_completed_at: summary.completedAt,
       heartbeat_at: summary.completedAt,
-      last_error: push.failed > 0 ? `${push.failed} push delivery attempt(s) failed.` : '',
+      last_error: runIssues.join(' '),
       last_summary_json: JSON.stringify(summary),
     });
     await Promise.all([
       upsertWorkerStatus('best_feed_discovery', {
         loop_mode: options.loopMode || 'scheduled',
-        last_status: discovery.partialScopes > 0 ? 'partial' : 'success',
+        last_status: discoveryStatus,
         last_started_at: startedAt,
         last_completed_at: summary.completedAt,
         heartbeat_at: summary.completedAt,
+        last_error: discoveryStatus === 'partial'
+          ? (discovery?.message || 'One or more configured discovery sources are unavailable.')
+          : '',
         last_summary_json: JSON.stringify(summary.discovery),
       }),
       upsertWorkerStatus('priority_alert_dispatch', {

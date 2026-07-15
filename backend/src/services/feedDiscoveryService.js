@@ -20,7 +20,7 @@ const MAX_TOPIC_QUERY_VIDEOS = 6;
 // Keep scheduled refreshes inside provider quotas. Deterministic scoring still
 // handles every candidate; live AI is reserved for the strongest new items.
 const MAX_ANALYSIS_PER_REFRESH = Math.max(
-  1,
+  0,
   Math.min(Number(process.env.DISCOVERY_AI_ANALYSIS_BUDGET || 2), 10)
 );
 const MAX_FALLBACK_AI_ALERTS = 12;
@@ -28,6 +28,9 @@ const MAX_ACTIVE_DISCOVERY_CANDIDATES = 72;
 const MAX_SOURCE_PACK_SOURCES_PER_REFRESH = 6;
 const MAX_SOURCE_PACK_ITEMS_PER_SOURCE = 4;
 const SOURCE_PACK_FETCH_TIMEOUT_MS = 6000;
+const MAX_DISCOVERY_CANDIDATE_AGE_HOURS = 72;
+const MAX_PEOPLE_OF_INTEREST = 3;
+const MAX_PEOPLE_QUERIES_PER_PERSON = 5;
 const POSITIVE_ACTIONS = new Set(['click', 'save', 'share', 'open_source']);
 const NEGATIVE_ACTIONS = new Set(['dismiss']);
 const STOPWORDS = new Set([
@@ -304,6 +307,16 @@ function freshnessHoursFromItems(items = [], fields = ['publishDate', 'published
   }
 
   return Number(Math.max(0, (Date.now() - Math.max(...timestamps)) / (1000 * 60 * 60)).toFixed(1));
+}
+
+function isCandidateWithinDiscoveryWindow(candidate = {}) {
+  const publishedAt = Date.parse(candidate?.publishDate || candidate?.publishedAt || '');
+  if (!Number.isFinite(publishedAt)) {
+    return false;
+  }
+
+  const ageMs = Date.now() - publishedAt;
+  return ageMs <= (MAX_DISCOVERY_CANDIDATE_AGE_HOURS * 60 * 60 * 1000) && ageMs >= -(6 * 60 * 60 * 1000);
 }
 
 function freshestNumericValue(rows = [], field = 'freshness_hours') {
@@ -908,7 +921,7 @@ function buildSourcePackFeedUrl(pack = {}, source = {}) {
 
 function normalizeSourcePackDate(value = '') {
   const parsed = Date.parse(value || '');
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date().toISOString();
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
 function buildSourcePackCandidate(pack = {}, source = {}, item = {}) {
@@ -1092,55 +1105,39 @@ function buildPeopleOfInterestMonitors(templateState = {}) {
     : [];
   const people = [...SYSTEM_PEOPLE_OF_INTEREST, ...configuredEntries]
     .map(normalizePeopleOfInterestEntry)
-    .filter((entry) => entry.name);
+    .filter((entry) => entry.name)
+    .filter((entry, index, entries) => entries.findIndex((candidate) => slugify(candidate.name) === slugify(entry.name)) === index)
+    .slice(0, MAX_PEOPLE_OF_INTEREST);
 
   const generated = [];
 
   for (const person of people) {
-    const subjects = [person.name, ...person.aliases]
-      .map((subject) => normalizeText(subject))
-      .filter(Boolean);
+    const subject = person.name;
+    const focusTopics = person.topics.slice(0, 2);
+    const personQueries = [
+      { query: `${subject} latest news`, intent: 'personal_match', weight: 0.82 },
+      { query: `${subject} official statement`, intent: 'personal_match', weight: 0.8 },
+      { query: `${subject} interview`, intent: 'interview_signal', weight: 0.8 },
+      ...(focusTopics[0]
+        ? [{ query: `${subject} ${focusTopics[0]}`, intent: 'personal_match', weight: 0.78 }]
+        : []),
+      ...(focusTopics[1]
+        ? [{ query: `${subject} ${focusTopics[1]} interview`, intent: 'interview_signal', weight: 0.74 }]
+        : []),
+    ];
 
-    for (const subject of subjects) {
-      generated.push(
-        { query: `${subject} latest news`, intent: 'personal_match', weight: 0.82, personName: person.name, trustTier: person.trustTier },
-        { query: `${subject} official statement`, intent: 'personal_match', weight: 0.8, personName: person.name, trustTier: person.trustTier },
-        { query: `${subject} policy diplomacy`, intent: 'personal_match', weight: 0.76, personName: person.name, trustTier: person.trustTier },
-        { query: `${subject} interview`, intent: 'interview_signal', weight: 0.8, personName: person.name, trustTier: person.trustTier },
-        { query: `${subject} transcript`, intent: 'interview_signal', weight: 0.78, personName: person.name, trustTier: person.trustTier },
-        { query: `${subject} podcast`, intent: 'interview_signal', weight: 0.74, personName: person.name, trustTier: person.trustTier },
-        { query: `${subject} conversation`, intent: 'interview_signal', weight: 0.7, personName: person.name, trustTier: person.trustTier },
-      );
-
-      for (const topic of person.topics) {
-        generated.push({
-          query: `${subject} ${topic} latest news`,
-          intent: 'personal_match',
-          weight: 0.78,
-          personName: person.name,
-          trustTier: person.trustTier,
-        });
-        generated.push({
-          query: `${subject} ${topic} official statement`,
-          intent: 'personal_match',
-          weight: 0.76,
-          personName: person.name,
-          trustTier: person.trustTier,
-        });
-        generated.push({
-          query: `${subject} ${topic} interview`,
-          intent: 'interview_signal',
-          weight: 0.68,
-          personName: person.name,
-          trustTier: person.trustTier,
-        });
-      }
+    for (const entry of personQueries.slice(0, MAX_PEOPLE_QUERIES_PER_PERSON)) {
+      generated.push({
+        ...entry,
+        personName: person.name,
+        trustTier: person.trustTier,
+      });
     }
   }
 
   return generated
     .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.query === entry.query) === index)
-    .slice(0, 24);
+    .slice(0, MAX_PEOPLE_OF_INTEREST * MAX_PEOPLE_QUERIES_PER_PERSON);
 }
 
 function buildSystemManagedQueries(templateState = {}) {
@@ -1157,7 +1154,8 @@ function buildSystemManagedQueries(templateState = {}) {
     })
     .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.query === entry.query) === index)
     .slice(0, 6);
-  return [...SYSTEM_TOPIC_MONITORS, ...buildPeopleOfInterestMonitors(templateState), ...dynamicQueries];
+  return [...SYSTEM_TOPIC_MONITORS, ...buildPeopleOfInterestMonitors(templateState), ...dynamicQueries]
+    .slice(0, 22);
 }
 
 function getSystemDiscoveryBlueprint() {
@@ -1191,10 +1189,17 @@ function buildDiscoveryFallbackCandidatesFromAlerts(alerts = [], templateState =
     : '';
 
   return (Array.isArray(alerts) ? alerts : [])
-    .filter((alert) => (alert?.category === 'ai' || alert?.category === 'science') && normalizeText(alert.title) && normalizeText(alert.url))
+    .filter((alert) => {
+      const publishedAt = normalizeAlertPublishedAt(alert);
+      return (alert?.category === 'ai' || alert?.category === 'science')
+        && normalizeText(alert.title)
+        && normalizeText(alert.url)
+        && Boolean(publishedAt)
+        && isCandidateWithinDiscoveryWindow({ publishDate: publishedAt });
+    })
     .sort((left, right) => {
-      const rightPublishedAt = Date.parse(right.publishedAt || right.seenAt || right.updatedAt || 0);
-      const leftPublishedAt = Date.parse(left.publishedAt || left.seenAt || left.updatedAt || 0);
+      const rightPublishedAt = Date.parse(normalizeAlertPublishedAt(right));
+      const leftPublishedAt = Date.parse(normalizeAlertPublishedAt(left));
       return (Number.isFinite(rightPublishedAt) ? rightPublishedAt : 0) - (Number.isFinite(leftPublishedAt) ? leftPublishedAt : 0);
     })
     .slice(0, MAX_FALLBACK_AI_ALERTS)
@@ -1202,7 +1207,7 @@ function buildDiscoveryFallbackCandidatesFromAlerts(alerts = [], templateState =
       const companyLabel = normalizeText(alert.release_watch_company_label || alert.release_watch_company || alert.source || alert.sourceLabel || 'AI release watch');
       const sourceLabel = normalizeText(alert.source || alert.sourceLabel || companyLabel || 'AI release watch');
       const sourceHint = normalizeText(alert.source_type || alert.sourceHint || (alert.official_source ? 'official' : 'press')) || 'official';
-      const publishedAt = normalizeText(alert.publishedAt || alert.seenAt || alert.updatedAt || '') || new Date().toISOString();
+      const publishedAt = normalizeAlertPublishedAt(alert);
       const summary = normalizeText(
         alert.summary
           || alert.whyItMatters
@@ -1249,6 +1254,11 @@ function buildDiscoveryFallbackCandidatesFromAlerts(alerts = [], templateState =
         },
       };
     });
+}
+
+function normalizeAlertPublishedAt(alert = {}) {
+  const parsed = Date.parse(alert?.publishedAt || alert?.published_at || '');
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
 }
 
 function mergeDiscoveryCandidates(dedupedCandidates, candidates = []) {
@@ -1352,10 +1362,17 @@ function listFeedCandidates(db, userId = '', limit = 60) {
     return db.prepare(`
       SELECT *
       FROM feed_candidates
-      WHERE scope_key = ? AND stale = 0
-      ORDER BY overall_score DESC, datetime(COALESCE(published_at, updated_at, created_at)) DESC
+      WHERE scope_key = ?
+        AND stale = 0
+        AND published_at IS NOT NULL
+        AND datetime(published_at) >= datetime('now', ?)
+      ORDER BY overall_score DESC, datetime(published_at) DESC
       LIMIT ?
-    `).all(scopeKey, Math.max(1, Math.min(Number(limit) || 60, 200)));
+    `).all(
+      scopeKey,
+      `-${MAX_DISCOVERY_CANDIDATE_AGE_HOURS} hours`,
+      Math.max(1, Math.min(Number(limit) || 60, 200))
+    );
   } catch (error) {
     return [];
   }
@@ -1497,6 +1514,33 @@ function dedupeSystemManagedTrackedChannels(db, scopeKey) {
   deactivateTrackedChannelIds(db, duplicateIds);
 }
 
+function deactivateObsoleteSystemManagedTopicMonitors(db, scopeKey, monitors = []) {
+  const activeKeys = [...new Set(
+    (Array.isArray(monitors) ? monitors : [])
+      .map((monitor) => buildQueryKey(monitor?.query))
+      .filter(Boolean)
+  )];
+
+  if (!activeKeys.length) {
+    db.prepare(`
+      UPDATE youtube_topic_monitors
+      SET active = 0, updated_at = CURRENT_TIMESTAMP
+      WHERE scope_key = ? AND system_managed = 1 AND active = 1
+    `).run(scopeKey);
+    return;
+  }
+
+  const placeholders = activeKeys.map(() => '?').join(', ');
+  db.prepare(`
+    UPDATE youtube_topic_monitors
+    SET active = 0, updated_at = CURRENT_TIMESTAMP
+    WHERE scope_key = ?
+      AND system_managed = 1
+      AND active = 1
+      AND query_key NOT IN (${placeholders})
+  `).run(scopeKey, ...activeKeys);
+}
+
 function filterRelevantSourceHealthEntries(sourceHealth = [], trackedChannels = [], topicMonitors = [], sourcePacks = []) {
   const sourcePackKeys = sourcePacks.flatMap((pack) => {
     if (!pack.active) {
@@ -1562,11 +1606,13 @@ function ensureSeedData(db, userId = '', templateState = {}) {
         `).run(scopeKey, buildChannelKey(channel.channelId, channel.query), channel.lane);
       }
     }
-    for (const monitor of buildSystemManagedQueries(templateState)) {
+    const systemMonitors = buildSystemManagedQueries(templateState);
+    for (const monitor of systemMonitors) {
       addTopicMonitor(db, userId, monitor);
       db.prepare(`UPDATE youtube_topic_monitors SET system_managed = 1, updated_at = CURRENT_TIMESTAMP WHERE scope_key = ? AND query_key = ?`)
         .run(scopeKey, buildQueryKey(monitor.query));
     }
+    deactivateObsoleteSystemManagedTopicMonitors(db, scopeKey, systemMonitors);
   }
 }
 
@@ -1790,6 +1836,10 @@ function upsertContentItem(db, candidate, analysis, scorePack, channelRow) {
   const contentId = existing?.id || crypto.randomUUID();
   const { sourceId, creatorId } = ensureSourceAndCreator(db, candidate, channelRow);
   const contentType = normalizeText(candidate.contentType, 'video').toLowerCase();
+  const channelType = contentType === 'article'
+    || ['radar', 'source_pack'].includes(normalizeText(candidate.platform).toLowerCase())
+    ? 'written'
+    : 'socialVideo';
 
   db.prepare(`
     INSERT INTO content_items (
@@ -1798,9 +1848,9 @@ function upsertContentItem(db, candidate, analysis, scorePack, channelRow) {
       rarity_score, depth_score, trust_score, freshness_score, timeless_score, clickbait_score,
       ingest_status, transcript_status, transcript_provider,
       analysis_provider, analysis_model, analysis_error,
-      topic_tags_json, content_type, created_at, updated_at
+      topic_tags_json, content_type, channel_type, created_at, updated_at
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, 'en', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, 'en', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
     )
     ON CONFLICT(external_id) DO UPDATE SET
       source_id = excluded.source_id,
@@ -1826,6 +1876,8 @@ function upsertContentItem(db, candidate, analysis, scorePack, channelRow) {
       analysis_model = COALESCE(excluded.analysis_model, content_items.analysis_model),
       analysis_error = excluded.analysis_error,
       topic_tags_json = excluded.topic_tags_json,
+      content_type = excluded.content_type,
+      channel_type = excluded.channel_type,
       updated_at = CURRENT_TIMESTAMP
   `).run(
     contentId,
@@ -1853,10 +1905,30 @@ function upsertContentItem(db, candidate, analysis, scorePack, channelRow) {
     analysis.analysis_model || null,
     analysis.analysis_error || null,
     JSON.stringify(analysis.topics || []),
-    contentType
+    contentType,
+    channelType
   );
 
   return contentId;
+}
+
+function normalizeWrittenArticleChannels(db) {
+  try {
+    const result = db.prepare(`
+      UPDATE content_items
+      SET channel_type = 'written', updated_at = CURRENT_TIMESTAMP
+      WHERE content_type = 'article'
+        AND COALESCE(channel_type, '') != 'written'
+        AND source_id IN (
+          SELECT id
+          FROM sources
+          WHERE platform IN ('radar', 'source_pack', 'written')
+        )
+    `).run();
+    return Number(result.changes || 0);
+  } catch (error) {
+    return 0;
+  }
 }
 
 function upsertFeedCandidate(db, scopeKey, contentId, candidate, scorePack, whySelected) {
@@ -1929,9 +2001,16 @@ function upsertSourceHealth(db, scopeKey, {
   freshnessHours = null,
   lastSuccessAt = null,
 }) {
-  const resolvedFreshnessHours = Number.isFinite(Number(freshnessHours))
+  const hasMeasuredFreshness = freshnessHours !== null
+    && freshnessHours !== undefined
+    && freshnessHours !== ''
+    && Number.isFinite(Number(freshnessHours));
+  const resolvedFreshnessHours = hasMeasuredFreshness
     ? Number(Math.max(0, Number(freshnessHours)).toFixed(1))
     : (producedItems > 0 ? 0 : 999);
+  const hasFreshDatedItems = Number(producedItems || 0) > 0
+    && hasMeasuredFreshness
+    && resolvedFreshnessHours <= MAX_DISCOVERY_CANDIDATE_AGE_HOURS;
   db.prepare(`
     INSERT INTO source_health_status (
       id, scope_key, platform, lane, source_key, source_label, status, produced_items, freshness_hours,
@@ -1956,7 +2035,7 @@ function upsertSourceHealth(db, scopeKey, {
     lane,
     sourceKey,
     sourceLabel || sourceKey,
-    errorMessage ? 'error' : (producedItems > 0 ? 'live' : 'stale'),
+    errorMessage ? 'error' : (hasFreshDatedItems ? 'live' : 'stale'),
     Number(producedItems || 0),
     resolvedFreshnessHours,
     errorMessage ? null : (lastSuccessAt || new Date().toISOString()),
@@ -2051,6 +2130,7 @@ function getDiscoveryStatus(db, userId = '') {
   }
   const liveSources = sourceHealth.filter((entry) => entry.status === 'live').length;
   const staleSources = sourceHealth.filter((entry) => entry.status !== 'live').length;
+  const errorSources = sourceHealth.filter((entry) => entry.status === 'error').length;
   const fallbackLiveSources = sourceHealth.filter((entry) => {
     const platform = String(entry.platform || '').toLowerCase();
     return entry.status === 'live' && platform !== 'youtube' && platform !== 'source_pack';
@@ -2082,17 +2162,20 @@ function getDiscoveryStatus(db, userId = '') {
 
     return false;
   });
+  const hasUsableDiscoveryData = candidateCount > 0 || livePipelineCount > 0 || fallbackLiveSources > 0;
+  const hasSourceDegradation = staleSources > 0 || errorSources > 0;
 
   return {
     scope_key: scopeKey,
-    status: (candidateCount > 0 || livePipelineCount > 0 || fallbackLiveSources > 0)
-      ? 'live'
+    status: hasUsableDiscoveryData
+      ? (hasSourceDegradation ? 'partial' : 'live')
       : (trackedChannels.length || topicMonitors.length || sourcePacks.length || hasAnyPipelineData ? 'partial' : 'unavailable'),
     tracked_channel_count: trackedChannels.length,
     topic_monitor_count: topicMonitors.length,
     source_pack_count: sourcePacks.length,
     live_source_count: liveSources,
     stale_source_count: staleSources,
+    error_source_count: errorSources,
     candidate_count: candidateCount,
     last_refresh_at: lastRefresh,
     tracked_channels: trackedChannels,
@@ -2107,6 +2190,8 @@ function getDiscoveryStatus(db, userId = '') {
         ? (candidateCount > 0
             ? 'Discovery is showing cached candidates because the current YouTube quota is exhausted.'
             : 'Discovery is blocked because the current YouTube quota is exhausted.')
+        : hasUsableDiscoveryData && hasSourceDegradation
+          ? 'Discovery has fresh candidates, but some configured sources are stale or unavailable.'
         : candidateCount > 0 && liveSources > 0
           ? 'YouTube-first discovery is generating ranked candidates.'
           : candidateCount > 0
@@ -2202,12 +2287,76 @@ async function resolveTrackedChannel(db, userId, row) {
 }
 
 function pruneScope(db, scopeKey) {
-  db.prepare(`UPDATE feed_candidates SET stale = 1, updated_at = CURRENT_TIMESTAMP WHERE scope_key = ? AND last_seen_at < datetime('now', '-2 days')`).run(scopeKey);
-  db.prepare(`DELETE FROM feed_candidates WHERE scope_key = ? AND COALESCE(published_at, updated_at, created_at) < datetime('now', ?)`).run(scopeKey, `-${DISCOVERY_RETENTION_DAYS} days`);
+  db.prepare(`
+    UPDATE feed_candidates
+    SET stale = 1, updated_at = CURRENT_TIMESTAMP
+    WHERE scope_key = ?
+      AND stale = 0
+      AND (
+        published_at IS NULL
+        OR datetime(published_at) < datetime('now', ?)
+      )
+  `).run(scopeKey, `-${MAX_DISCOVERY_CANDIDATE_AGE_HOURS} hours`);
+  db.prepare(`
+    DELETE FROM feed_candidates
+    WHERE scope_key = ?
+      AND (
+        (published_at IS NOT NULL AND datetime(published_at) < datetime('now', ?))
+        OR (published_at IS NULL AND datetime(created_at) < datetime('now', ?))
+      )
+  `).run(scopeKey, `-${DISCOVERY_RETENTION_DAYS} days`, `-${DISCOVERY_RETENTION_DAYS} days`);
+}
+
+function sanitizeUndatedRadarDerivedContent(db) {
+  try {
+    const invalidRows = db.prepare(`
+      SELECT DISTINCT fc.id AS candidate_id, fc.content_id
+      FROM feed_candidates fc
+      JOIN priority_alerts pa
+        ON pa.title = fc.title
+        AND COALESCE(pa.url, '') = COALESCE(fc.url, '')
+      WHERE fc.platform = 'radar'
+        AND (pa.published_at IS NULL OR TRIM(pa.published_at) = '')
+    `).all();
+
+    if (!invalidRows.length) {
+      return { candidatesRetired: 0, contentDatesCleared: 0 };
+    }
+
+    const candidateIds = invalidRows.map((row) => row.candidate_id).filter(Boolean);
+    const contentIds = [...new Set(invalidRows.map((row) => row.content_id).filter(Boolean))];
+    const candidatePlaceholders = candidateIds.map(() => '?').join(', ');
+    const contentPlaceholders = contentIds.map(() => '?').join(', ');
+
+    const candidateResult = db.prepare(`
+      UPDATE feed_candidates
+      SET stale = 1, updated_at = CURRENT_TIMESTAMP
+      WHERE id IN (${candidatePlaceholders})
+        AND stale = 0
+    `).run(...candidateIds);
+    const contentResult = contentIds.length
+      ? db.prepare(`
+        UPDATE content_items
+        SET publish_date = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (${contentPlaceholders})
+          AND external_id LIKE 'radar:%'
+      `).run(...contentIds)
+      : { changes: 0 };
+
+    return {
+      candidatesRetired: Number(candidateResult.changes || 0),
+      contentDatesCleared: Number(contentResult.changes || 0),
+    };
+  } catch (error) {
+    // Partial schemas are used by focused tests; ordinary discovery can continue.
+    return { candidatesRetired: 0, contentDatesCleared: 0 };
+  }
 }
 
 async function refreshDiscoveryForScope(db, { userId = '', templateState = {}, force = false } = {}) {
   const scopeKey = normalizeScopeKey(userId);
+  sanitizeUndatedRadarDerivedContent(db);
+  normalizeWrittenArticleChannels(db);
   ensureSeedData(db, userId, templateState);
   syncWatchedSourcePackHealth(db, userId);
   const youtubeApiConfigured = youtubeService.hasConfiguredYouTubeApiKey();
@@ -2255,7 +2404,10 @@ async function refreshDiscoveryForScope(db, { userId = '', templateState = {}, f
         });
         continue;
       }
-      const videos = await youtubeService.fetchRecentVideosByChannel(resolved.channel_id, { maxResults: MAX_TRACKED_CHANNEL_VIDEOS });
+      const videos = await youtubeService.fetchRecentVideosByChannel(resolved.channel_id, {
+        maxResults: MAX_TRACKED_CHANNEL_VIDEOS,
+        query: resolved.channel_name || resolved.channel_query || row.channel_name || row.channel_query,
+      });
       upsertSourceHealth(db, scopeKey, {
         lane: row.lane,
         sourceKey: resolved.channel_key,
@@ -2432,6 +2584,7 @@ async function refreshDiscoveryForScope(db, { userId = '', templateState = {}, f
   }
 
   const candidates = [...dedupedCandidates.values()]
+    .filter((candidate) => isCandidateWithinDiscoveryWindow(candidate))
     .sort((left, right) => Date.parse(right.publishDate || 0) - Date.parse(left.publishDate || 0))
     .slice(0, MAX_ACTIVE_DISCOVERY_CANDIDATES);
 
@@ -2487,6 +2640,7 @@ async function refreshDiscoveryForScope(db, { userId = '', templateState = {}, f
     topicMonitorCount: status.topic_monitor_count,
     liveSourceCount: status.live_source_count,
     staleSourceCount: status.stale_source_count,
+    errorSourceCount: status.error_source_count,
     status: status.status,
     pipeline_health: status.pipeline_health,
     pipelines: status.pipeline_health,
@@ -2649,14 +2803,26 @@ module.exports = {
   listTrackedChannels,
   refreshDiscoveryForAllScopes,
   refreshDiscoveryForScope,
+  sanitizeUndatedRadarDerivedContent,
+  normalizeWrittenArticleChannels,
   listWatchedSourcePacks,
   addWatchedSourcePack,
   previewWatchedSourcePack,
   updateWatchedSourcePack,
   syncWatchedSourcePackHealth,
   __test__: {
+    buildPeopleOfInterestMonitors,
+    buildSystemManagedQueries,
     buildDiscoveryFallbackCandidatesFromAlerts,
+    ensureSeedData,
     mergeDiscoveryCandidates,
+    normalizeWrittenArticleChannels,
     isQuotaLikeErrorMessage,
+    isCandidateWithinDiscoveryWindow,
+    listFeedCandidates,
+    pruneScope,
+    sanitizeUndatedRadarDerivedContent,
+    upsertSourceHealth,
+    upsertContentItem,
   },
 };
