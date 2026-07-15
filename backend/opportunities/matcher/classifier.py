@@ -82,9 +82,13 @@ CAT3_TITLE_STRONG = [
     "community manager",
     "social media manager", "social media specialist",
     "english teacher", "angol tanár", "tutor",
-    "psychologist", "pszichológus",
+    "psychologist", "pszichológus", "pszichologus",
+    "psychology", "pszichológia", "pszichologia",
+    "research assistant", "lab assistant", "laboratory assistant",
+    "kutatási asszisztens", "kutatasi asszisztens",
     "junior developer", "junior python", "junior data",
     "it support", "helpdesk",
+    "annotator", "data labeler", "data labelling",
 ]
 
 # Weaker title signals — only Cat3 if MULTIPLE appear, or with strong desc support
@@ -106,7 +110,17 @@ CAT3_TITLE_WEAK = [
     "teacher", "tanar", "tanár", "oktato",
 ]
 
-CAT3_SOURCES = {"nofluffjobs", "remoteok", "remotive", "euraxess", "huggingface_workable"}
+CAT3_SOURCES = {
+    "nofluffjobs",
+    "remoteok",
+    "remotive",
+    "euraxess",
+    "huggingface_workable",
+    "weworkremotely",
+    "jobicy",
+    "himalayas",
+    "arbeitnow",
+}
 
 # Vision keywords that are unambiguous enough to trigger Cat3 from description
 # (must have 5+ of these, not just "AI" appearing once in boilerplate)

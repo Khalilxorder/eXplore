@@ -463,6 +463,87 @@ function getScholarshipsDb() {
   }
 }
 
+const MISS_NOTHING_MIN_SCORE = 50;
+
+function compareJobsByScore(left, right) {
+  const leftScore = Number(left?._score || left?.profile_match_score || 0);
+  const rightScore = Number(right?._score || right?.profile_match_score || 0);
+  if (rightScore !== leftScore) return rightScore - leftScore;
+  const leftUrl = left?.url ? 1 : 0;
+  const rightUrl = right?.url ? 1 : 0;
+  if (rightUrl !== leftUrl) return rightUrl - leftUrl;
+  return String(left?.date_posted || '').localeCompare(String(right?.date_posted || ''));
+}
+
+function buildMissNothingJobPool(result = {}, minScore = MISS_NOTHING_MIN_SCORE) {
+  const combined = dedupeJobList([
+    ...(Array.isArray(result.miss_nothing) ? result.miss_nothing : []),
+    ...(Array.isArray(result.cat3) ? result.cat3 : []),
+    ...(Array.isArray(result.cat1) ? result.cat1 : []),
+    ...(Array.isArray(result.cat2) ? result.cat2 : []),
+    ...(Array.isArray(result.top10) ? result.top10 : []),
+  ]);
+
+  return combined
+    .filter((job) => Number(job?._score || 0) >= minScore)
+    .sort(compareJobsByScore);
+}
+
+function matchesJobQuery(job = {}, query = '') {
+  const q = normalizeNeedle(query);
+  if (!q) return true;
+  const blob = normalizeJobComparable([
+    job.title,
+    job.company,
+    job.description,
+    job.requirements,
+    job.tags,
+    job.city,
+    job.location,
+    job.source,
+    job.employment_type,
+  ].join(' '));
+  const tokens = q.split(/\s+/).filter(Boolean);
+  return tokens.every((token) => blob.includes(token));
+}
+
+/**
+ * Search ranked jobs with profile scores preserved.
+ * Miss-nothing policy: never hide high-fit listings behind a tiny top-N cap.
+ */
+function searchJobs(params = {}) {
+  const data = getJobs();
+  const q = String(params.q || '').trim();
+  const minScore = Number.isFinite(Number(params.min_score))
+    ? Number(params.min_score)
+    : MISS_NOTHING_MIN_SCORE;
+  const limit = Math.min(Math.max(parseInt(params.limit, 10) || 50, 1), 250);
+  const offset = Math.max(parseInt(params.offset, 10) || 0, 0);
+  const typeGroup = normalizeNeedle(params.type_group || '');
+  const locationGroup = normalizeNeedle(params.location_group || '');
+
+  const pool = buildMissNothingJobPool(data, 0)
+    .filter((job) => Number(job?._score || 0) >= minScore)
+    .filter((job) => matchesJobQuery(job, q))
+    .filter((job) => !typeGroup || normalizeNeedle(job.job_type_group) === typeGroup)
+    .filter((job) => !locationGroup || normalizeNeedle(job.location_group) === locationGroup);
+
+  return {
+    total: pool.length,
+    offset,
+    limit,
+    min_score: minScore,
+    query: q || null,
+    jobs: pool.slice(offset, offset + limit),
+    meta: {
+      ranked_generated_at: data.meta?.freshness?.ranked_generated_at || null,
+      profile_lens: data.meta?.profile_lens || getProfileLensSummary(),
+      source_coverage: data.meta?.source_coverage || null,
+      miss_nothing: data.meta?.miss_nothing || null,
+    },
+  };
+}
+
 /**
  * Get job statistics and categories.
  */
@@ -472,6 +553,7 @@ function getJobs() {
     cat2_longterm: path.join(JOB_RANKED_DIR, 'cat2_longterm.json'),
     cat3_vision: path.join(JOB_RANKED_DIR, 'cat3_vision.json'),
     top10: path.join(JOB_RANKED_DIR, 'top10.json'),
+    miss_nothing: path.join(JOB_RANKED_DIR, 'miss_nothing.json'),
   };
   const outputEvidence = getJobOutputEvidence();
   const sourceEvidenceByName = Object.fromEntries(
@@ -486,8 +568,11 @@ function getJobs() {
       _cat1: 0,
       _cat2: 0,
       _cat3: 0,
+      _miss_nothing: 0,
     },
     top10: [],
+    miss_nothing: [],
+    recommended: [],
     cat1: [],
     cat2: [],
     cat3: [],
@@ -516,25 +601,54 @@ function getJobs() {
       result.cat3 = dedupeJobList(data.jobs || [])
         .map((job) => enrichJob(job, 'cat3', sourceEvidenceByName));
     }
+    if (fs.existsSync(categories.miss_nothing)) {
+      const data = JSON.parse(fs.readFileSync(categories.miss_nothing, 'utf8'));
+      result.miss_nothing = dedupeJobList(data.jobs || [])
+        .map((job) => enrichJob(job, job._category || 'high_fit', sourceEvidenceByName));
+    }
   } catch (err) {
     console.error(`[error] Failed to read job rank JSON files: ${err.message}`);
   }
 
+  // Fallback / union: rebuild high-fit pool from categories if miss_nothing file absent.
+  result.recommended = buildMissNothingJobPool(result, MISS_NOTHING_MIN_SCORE);
+  if (!result.miss_nothing.length) {
+    result.miss_nothing = result.recommended.slice();
+  }
+
+  const sourceCoverage = getJobSourceCoverage(outputEvidence);
+  const highFitSources = new Set(
+    result.recommended.map((job) => normalizeNeedle(job.source)).filter(Boolean)
+  );
+  const missNothingMeta = {
+    min_score: MISS_NOTHING_MIN_SCORE,
+    high_fit_count: result.recommended.length,
+    strong_fit_count: result.recommended.filter((job) => Number(job._score || 0) >= 70).length,
+    sources_with_high_fit: [...highFitSources].sort(),
+    missing_critical_sources: sourceCoverage.missing_critical || [],
+    stale_sources: sourceCoverage.stale || [],
+    policy: 'Include every kept listing with personal fit score >= 50; do not hide behind top-N diversity caps.',
+  };
+
   result.meta = {
     ...result.meta,
     _generated_iso: normalizeRankGenerated(result.meta._generated),
+    _miss_nothing: result.miss_nothing.length,
     category_counts: {
       cat1_fast: result.meta._cat1 || result.cat1.length,
       cat2_longterm: result.meta._cat2 || result.cat2.length,
       cat3_vision: result.meta._cat3 || result.cat3.length,
       top10: result.top10.length,
+      miss_nothing: result.miss_nothing.length,
+      recommended: result.recommended.length,
     },
-      source_counts: outputEvidence.source_counts,
-      source_coverage: getJobSourceCoverage(outputEvidence),
-      freshness: {
-        ranked_generated_at: normalizeRankGenerated(result.meta._generated),
-        ranked_file_modified_at: getIsoMtime(categories.top10),
-        all_jobs_modified_at: outputEvidence.all_jobs_modified_at,
+    source_counts: outputEvidence.source_counts,
+    source_coverage: sourceCoverage,
+    miss_nothing: missNothingMeta,
+    freshness: {
+      ranked_generated_at: normalizeRankGenerated(result.meta._generated),
+      ranked_file_modified_at: getIsoMtime(categories.top10),
+      all_jobs_modified_at: outputEvidence.all_jobs_modified_at,
       last_posted_at: outputEvidence.last_posted_at,
       source_files: outputEvidence.source_files,
     },
@@ -934,11 +1048,12 @@ function scoreScholarshipProfileFit(d) {
   const isOfficialSource = sourceMatch?.tier === 'official';
   add(isOfficialSource, 24, 'Official source');
   add(sourceMatch?.tier === 'aggregator', 5, 'Priority aggregator');
-  addGoal(textIncludesAny(fieldText, ['psychology', 'cognitive', 'mental health', 'social science', 'behavioral', 'neuroscience']), 18, 'Psychology fit');
-  addGoal(textIncludesAny(fieldText, ['ai', 'artificial intelligence', 'data science', 'machine learning', 'technology', 'automation', 'human-computer', 'computational']), 18, 'AI/data fit');
-  addGoal(textIncludesAny(fieldText, ['research', 'fellowship', 'post-baccalaureate', 'phd', 'doctoral', 'lab', 'university']), 16, 'Research path');
+  addGoal(textIncludesAny(fieldText, ['psychology', 'cognitive', 'mental health', 'social science', 'behavioral', 'behavioural', 'neuroscience', 'psych']), 20, 'Psychology fit');
+  addGoal(textIncludesAny(fieldText, ['ai', 'artificial intelligence', 'data science', 'machine learning', 'technology', 'automation', 'human-computer', 'computational', 'digital humanities']), 18, 'AI/data fit');
+  addGoal(textIncludesAny(fieldText, ['research', 'fellowship', 'post-baccalaureate', 'phd', 'doctoral', 'lab', 'university', 'internship', 'mobility', 'exchange']), 16, 'Research path');
   addGoal(textIncludesAny(fieldText, ['creative', 'arts', 'music', 'media', 'writing', 'journalism', 'communication', 'film']), 11, 'Creative path');
-  addGoal(textIncludesAny(levelText, ['bachelor', 'undergraduate', 'master', 'graduate', 'msc', 'ma', 'research', 'phd', 'doctoral']), 10, 'Education-level fit');
+  addGoal(textIncludesAny(levelText, ['bachelor', 'undergraduate', 'master', 'graduate', 'msc', 'ma', 'research', 'phd', 'doctoral', 'student']), 10, 'Education-level fit');
+  addGoal(textIncludesAny(fieldText, ['hungary', 'budapest', 'central europe', 'pannonia', 'ceepus', 'erasmus', 'stipendium']), 12, 'Hungary / CE mobility');
 
   const countryText = [
     Array.isArray(d.host_countries) ? d.host_countries.join(' ') : d.host_countries,
@@ -1207,6 +1322,7 @@ function getScholarshipById(id) {
 
 module.exports = {
   getJobs,
+  searchJobs,
   triggerJobSweep,
   getUserProfile,
   saveUserProfile,
@@ -1216,8 +1332,12 @@ module.exports = {
   getOpportunitySourceCoverage,
   __test__: {
     buildCoverageReport,
+    buildMissNothingJobPool,
+    compareJobsByScore,
     isScholarshipListingCandidate,
+    matchesJobQuery,
     matchesScholarshipQuery,
     withScholarshipSnapshotFreshness,
+    MISS_NOTHING_MIN_SCORE,
   },
 };

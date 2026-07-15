@@ -101,3 +101,55 @@ test('coverage report distinguishes portal-only scholarship evidence from full c
   assert.equal(report.sources[0].status, 'portal_only');
   assert.match(report.summary, /portal-only/);
 });
+
+const {
+  buildMissNothingJobPool,
+  matchesJobQuery,
+  compareJobsByScore,
+  MISS_NOTHING_MIN_SCORE,
+} = opportunitiesService.__test__;
+
+test('miss-nothing job pool keeps every high-fit listing, not only top-N', () => {
+  const pool = buildMissNothingJobPool({
+    top10: [{ title: 'A', source: 'x', _score: 90, url: 'https://a.example/1' }],
+    cat3: [
+      { title: 'B', source: 'y', _score: 72, url: 'https://b.example/1' },
+      { title: 'C', source: 'y', _score: 71, url: 'https://c.example/1' },
+      { title: 'D', source: 'y', _score: 70, url: 'https://d.example/1' },
+      { title: 'E', source: 'z', _score: 40, url: 'https://e.example/1' },
+    ],
+    cat1: [{ title: 'F', source: 'minddiak', _score: 55, url: 'https://f.example/1' }],
+    cat2: [],
+  }, 50);
+
+  assert.equal(pool.length, 5);
+  assert.equal(pool.every((job) => Number(job._score) >= 50), true);
+  assert.equal(pool[0]._score, 90);
+  assert.ok(pool.some((job) => job.title === 'F'));
+  assert.equal(pool.some((job) => job.title === 'E'), false);
+});
+
+test('job query matching requires all tokens and ignores weak partial noise', () => {
+  assert.equal(matchesJobQuery({
+    title: 'Research Assistant Psychology Lab',
+    description: 'Budapest university',
+    company: 'ELTE',
+  }, 'psychology research'), true);
+
+  assert.equal(matchesJobQuery({
+    title: 'Warehouse Picker',
+    description: 'Physical work',
+  }, 'psychology research'), false);
+});
+
+test('job score comparator prefers higher personal fit then apply URL', () => {
+  const ordered = [
+    { title: 'low', _score: 40, url: 'https://x' },
+    { title: 'high-no-url', _score: 80 },
+    { title: 'high-url', _score: 80, url: 'https://y' },
+  ].sort(compareJobsByScore);
+
+  assert.equal(ordered[0].title, 'high-url');
+  assert.equal(ordered[1].title, 'high-no-url');
+  assert.equal(MISS_NOTHING_MIN_SCORE, 50);
+});

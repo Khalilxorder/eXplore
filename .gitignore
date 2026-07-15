@@ -106,3 +106,7 @@ next-env.d.ts
 
 supabase/.temp/
 
+
+__pycache__/
+*.pyc
+

@@ -56,12 +56,36 @@ module.exports = async function opportunitiesRoutes(fastify, options) {
       return {
         ...data,
         top10: (data.top10 || []).map((item) => decorateOpportunity(item, hierarchy)),
+        recommended: (data.recommended || []).map((item) => decorateOpportunity(item, hierarchy)),
+        miss_nothing: (data.miss_nothing || []).map((item) => decorateOpportunity(item, hierarchy)),
         cat1: (data.cat1 || []).map((item) => decorateOpportunity(item, hierarchy)),
         cat2: (data.cat2 || []).map((item) => decorateOpportunity(item, hierarchy)),
         cat3: (data.cat3 || []).map((item) => decorateOpportunity(item, hierarchy)),
       };
     } catch (err) {
       reply.status(500).send({ error: 'Failed to retrieve jobs', message: err.message });
+    }
+  });
+
+  // ─── GET /api/v1/opportunities/jobs/search ─────────────────────────
+  // Miss-nothing search: full high-fit pool, not only top-N diversity shortlist.
+  fastify.get('/jobs/search', async (request, reply) => {
+    try {
+      const payload = opportunitiesService.searchJobs({
+        q: request.query.q,
+        min_score: request.query.min_score,
+        limit: request.query.limit,
+        offset: request.query.offset,
+        type_group: request.query.type_group,
+        location_group: request.query.location_group,
+      });
+      const hierarchy = request.user?.id ? valueHierarchy.getState(db, request.user.id) : {};
+      return {
+        ...payload,
+        jobs: (payload.jobs || []).map((item) => decorateOpportunity(item, hierarchy)),
+      };
+    } catch (err) {
+      reply.status(500).send({ error: 'Failed to search jobs', message: err.message });
     }
   });
 

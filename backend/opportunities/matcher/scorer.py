@@ -208,6 +208,27 @@ def score(job):
         points += pts
         breakdown["part_time"] = f"+{pts}"
 
+    # Student / intern / assistant path (high personal priority — never bury these)
+    student_path = [
+        "intern", "internship", "trainee", "student", "gyakornok",
+        "research assistant", "lab assistant", "assistant",
+        "diák", "diak", "part-time", "részmunkaidő", "reszmunkaido",
+    ]
+    if _has_any(title, student_path) or emp_t in ("PART_TIME", "TEMPORARY", "INTERNSHIP"):
+        points += 8
+        breakdown["student_path"] = "+8"
+
+    # Psychology / cognitive / research-lab fit (profile core)
+    psych_research = [
+        "psychology", "psychological", "pszichológ", "pszicholog",
+        "cognitive", "neuroscience", "mental health", "behavioral",
+        "research assistant", "lab ", "laboratory", "university",
+        "academic", "euraxess",
+    ]
+    if _has_any(full, psych_research):
+        points += 10
+        breakdown["psych_research_fit"] = "+10"
+
     # ── PENALTIES ────────────────────────────────────────────────
     pen = w["penalties"]
 
