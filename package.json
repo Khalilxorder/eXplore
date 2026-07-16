@@ -29,6 +29,7 @@
                     "android:debug":  "powershell -ExecutionPolicy Bypass -File scripts/build-android-debug.ps1",
                     "android:release":  "powershell -ExecutionPolicy Bypass -File scripts/build-android-release.ps1",
                     "config:sync":  "powershell -ExecutionPolicy Bypass -File scripts/sync-machine-config.ps1",
+                    "probe:gemini":  "node scripts/probe-gemini-pool.mjs",
                     "config:init-gemini-pool":  "powershell -ExecutionPolicy Bypass -File scripts/init-gemini-key-pool.ps1",
                     "config:add-gemini-key":  "powershell -ExecutionPolicy Bypass -File scripts/add-gemini-key.ps1",
                     "config:open":  "powershell -ExecutionPolicy Bypass -File scripts/sync-machine-config.ps1 -Open",

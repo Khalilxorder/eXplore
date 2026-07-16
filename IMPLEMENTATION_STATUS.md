@@ -68,14 +68,18 @@ Historical aspirational engine checklist items that are already covered by live 
 4. Authenticated release smoke with a real bearer token.
 5. Optional: rebuild signed APK/AAB after this finalize (web+Android assets now aligned).
 
-## Last verification snapshot (2026-07-15 finalize)
+## Last verification snapshot (2026-07-16 close-out)
 
 - Full pipeline: `npm run verify` green (lint, frontend, backend, build, android asset sync, news-page, smoke, release-contract)
 - Frontend static verifiers: pass
-- Backend tests: 244/244 pass
+- Backend tests: **247/247** pass
 - ESLint errors: 0 (warnings only)
-- Production build: pass — `explore-20260715200106-ededbd6a`
+- Production build: pass — `explore-20260716001508-1d0f4382`
 - Android web assets: synced to same build id (verify auto-copies after build)
 - News-page verifier: pass (72h visibility, images, priority, scientist tool)
 - Runtime smoke: pass (anonymous protected routes + official-releases)
-- Definition of local-done: BUILD_SPEC modules + LDI spine + feed reliability fixes covered by automated proof
+- Gemini live probe: 11 unique keys; 7 immediate OK + 4×429 (rotation-safe); model `gemini-3.5-flash`
+- Live API proof: health/readiness/messages/coverage/jobs all HTTP 200 on local backend
+- Opportunities: miss_nothing 194 high-fit; scrapes may show stale until next `jobs/sweep`
+- Definition of local-done: LDI spine + feed reliability + miss-nothing + live Gemini pool + verify green
+- Hosted two-user messaging E2E + physical FCM remain external (see `FINAL_PROOF_2026-07-16.md`)
