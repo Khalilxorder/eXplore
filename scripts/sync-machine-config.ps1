@@ -322,6 +322,201 @@ function Get-AndroidApplicationId {
   return ''
 }
 
+function Test-UsableXaiKey {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return $false
+  }
+
+  $trimmed = $Value.Trim()
+  if ($trimmed.Length -lt 12) {
+    return $false
+  }
+
+  if ($trimmed -match 'YOUR_|CHANGE_ME|REPLACE_ME|PLACEHOLDER|EXAMPLE|FAKE|DEMO') {
+    return $false
+  }
+
+  if ($trimmed -match '^(x|y|z|null|none|undefined|test)$') {
+    return $false
+  }
+
+  return $true
+}
+
+function Get-XaiPoolEntries {
+  param(
+    [string]$PoolPath,
+    [int]$MaxSlots = 3,
+    [switch]$IncludeEmpty
+  )
+
+  # Returns slot-aligned entries (index 0 => XAI_API_KEY_1). Empty/disabled
+  # slots are kept as placeholders when -IncludeEmpty so later keys do not shift.
+  $entries = @()
+  if ([string]::IsNullOrWhiteSpace($PoolPath) -or -not (Test-Path $PoolPath)) {
+    return $entries
+  }
+
+  try {
+    $raw = Get-Content -Raw -Path $PoolPath
+    if ($raw.Length -gt 0 -and $raw[0] -eq [char]0xfeff) {
+      $raw = $raw.Substring(1)
+    }
+    $pool = $raw | ConvertFrom-Json
+    $source = @()
+    if ($pool -is [System.Collections.IEnumerable] -and -not ($pool -is [string]) -and -not ($pool.PSObject.Properties.Name -contains 'keys')) {
+      $source = @($pool)
+    } elseif ($pool -and $pool.keys) {
+      $source = @($pool.keys)
+    }
+
+    $limit = $source.Count
+    if ($MaxSlots -gt 0 -and $limit -gt $MaxSlots) {
+      $limit = $MaxSlots
+    }
+
+    for ($index = 1; $index -le $limit; $index += 1) {
+      $entry = $source[$index - 1]
+      $placeholder = [ordered]@{
+        id = "xai-account-$index"
+        label = "xAI account $index"
+        key = ''
+        enabled = $false
+        usable = $false
+        slot = $index
+      }
+
+      if ($entry -is [string]) {
+        $key = $entry.Trim()
+        $placeholder.key = $key
+        $placeholder.enabled = $true
+        $placeholder.usable = (Test-UsableXaiKey $key)
+        if ($placeholder.usable -or $IncludeEmpty) {
+          $entries += $placeholder
+        }
+        continue
+      }
+
+      $key = [string]$entry.key
+      if ([string]::IsNullOrWhiteSpace($key)) { $key = [string]$entry.apiKey }
+      if ([string]::IsNullOrWhiteSpace($key)) { $key = [string]$entry.value }
+      $key = if ($null -eq $key) { '' } else { $key.Trim() }
+
+      $enabled = $true
+      if ($null -ne $entry.enabled) {
+        $enabled = [bool]$entry.enabled
+      }
+
+      $label = [string]$entry.label
+      if ([string]::IsNullOrWhiteSpace($label)) { $label = [string]$entry.account }
+      if ([string]::IsNullOrWhiteSpace($label)) { $label = [string]$entry.name }
+      if ([string]::IsNullOrWhiteSpace($label)) { $label = "xAI account $index" }
+
+      $id = [string]$entry.id
+      if ([string]::IsNullOrWhiteSpace($id)) { $id = "xai-account-$index" }
+
+      $usable = $enabled -and (Test-UsableXaiKey $key)
+      $placeholder.id = $id
+      $placeholder.label = $label
+      $placeholder.key = $key
+      $placeholder.enabled = $enabled
+      $placeholder.usable = $usable
+
+      if ($usable -or $IncludeEmpty) {
+        $entries += $placeholder
+      }
+    }
+  } catch {
+    Write-Output "Warning: could not read xAI key pool at $PoolPath"
+  }
+
+  return $entries
+}
+
+function Merge-XaiPoolIntoBackendEnv {
+  param(
+    [System.Collections.IDictionary]$BackendEnv,
+    [string]$PoolPath
+  )
+
+  if ([string]::IsNullOrWhiteSpace($PoolPath)) {
+    return 0
+  }
+
+  Set-IfBlank -Map $BackendEnv -Key 'XAI_KEY_POOL_FILE' -Value $PoolPath
+
+  $maxSlots = 3
+  # Slot-aligned read: empty pool slots must NOT compact into earlier env slots,
+  # and must NOT overwrite existing real env values.
+  $entries = @(Get-XaiPoolEntries -PoolPath $PoolPath -MaxSlots $maxSlots -IncludeEmpty)
+  if ($entries.Count -eq 0) {
+    return 0
+  }
+
+  $mergedKeys = New-Object System.Collections.Generic.List[string]
+  $firstUsable = $null
+  $applied = 0
+
+  for ($i = 1; $i -le $maxSlots; $i += 1) {
+    if ($i -gt $entries.Count) {
+      break
+    }
+
+    $entry = $entries[$i - 1]
+    $keyName = "XAI_API_KEY_$i"
+    $labelName = "XAI_ACCOUNT_LABEL_$i"
+    $keyValue = [string]$entry.key
+    $labelValue = [string]$entry.label
+    $usable = $false
+    if ($null -ne $entry.usable) {
+      $usable = [bool]$entry.usable
+    } else {
+      $usable = (Test-UsableXaiKey $keyValue)
+    }
+
+    # Prefer pool values when present; never clear an existing non-empty env slot
+    # just because this pool slot is empty/disabled.
+    if ($usable) {
+      $BackendEnv[$keyName] = $keyValue
+      $mergedKeys.Add($keyValue)
+      $applied += 1
+      if ($null -eq $firstUsable) {
+        $firstUsable = $entry
+      }
+
+      if (-not [string]::IsNullOrWhiteSpace($labelValue)) {
+        $BackendEnv[$labelName] = $labelValue
+      }
+    } elseif (-not [string]::IsNullOrWhiteSpace($labelValue)) {
+      # Label-only fill when blank; still do not wipe a real key in this slot.
+      if (-not $BackendEnv.Contains($labelName) -or [string]::IsNullOrWhiteSpace([string]$BackendEnv[$labelName])) {
+        $BackendEnv[$labelName] = $labelValue
+      }
+    }
+  }
+
+  if ($mergedKeys.Count -gt 0 -and $null -ne $firstUsable) {
+    Set-IfBlank -Map $BackendEnv -Key 'XAI_API_KEY' -Value $mergedKeys[0]
+    Set-IfBlank -Map $BackendEnv -Key 'XAI_ACCOUNT_LABEL' -Value ([string]$firstUsable.label)
+    $csv = ($mergedKeys | Select-Object -Unique) -join ','
+    if ([string]::IsNullOrWhiteSpace([string]$BackendEnv['XAI_API_KEYS'])) {
+      $BackendEnv['XAI_API_KEYS'] = $csv
+    }
+  }
+
+  if (
+    [string]::IsNullOrWhiteSpace([string]$BackendEnv['XAI_ACTIVE_ACCOUNT_ID']) -and
+    $null -ne $firstUsable -and
+    -not [string]::IsNullOrWhiteSpace([string]$firstUsable.id)
+  ) {
+    $BackendEnv['XAI_ACTIVE_ACCOUNT_ID'] = [string]$firstUsable.id
+  }
+
+  return $applied
+}
+
 function Get-GoogleServicesPackageNames {
   param([string]$JsonPath)
 
@@ -417,6 +612,18 @@ function New-DefaultProjectConfig {
     GEMINI_ANALYSIS_MODEL = 'gemini-3.5-flash'
     GEMINI_TEMPLATE_MODEL = 'gemini-3.5-flash'
     GEMINI_EMBEDDING_MODEL = 'gemini-embedding-001'
+    XAI_API_KEY = ''
+    XAI_API_KEY_1 = ''
+    XAI_API_KEY_2 = ''
+    XAI_API_KEY_3 = ''
+    XAI_ACCOUNT_LABEL = ''
+    XAI_ACCOUNT_LABEL_1 = ''
+    XAI_ACCOUNT_LABEL_2 = ''
+    XAI_ACCOUNT_LABEL_3 = ''
+    XAI_API_KEYS = ''
+    XAI_KEY_POOL_FILE = ''
+    XAI_ACTIVE_ACCOUNT_ID = ''
+    XAI_BASE_URL = 'https://api.x.ai/v1'
     FIREBASE_PROJECT_ID = ''
     FIREBASE_SERVICE_ACCOUNT_JSON = ''
     WRITTEN_NEWS_FEEDS = 'https://feeds.bbci.co.uk/news/technology/rss.xml,https://feeds.bbci.co.uk/news/world/rss.xml,https://feeds.bbci.co.uk/news/business/rss.xml'
@@ -523,6 +730,15 @@ if (-not [string]::IsNullOrWhiteSpace($firebaseServiceAccountPath) -and (Test-Pa
   }
 }
 
+# Flow xAI keys: prefer configured pool path, else machine default.
+$xaiPoolPath = [string]$projectConfig.backendEnv['XAI_KEY_POOL_FILE']
+if ([string]::IsNullOrWhiteSpace($xaiPoolPath)) {
+  $xaiPoolPath = Join-Path $machineConfigRoot 'xai-key-pool.json'
+}
+$xaiKeysMerged = Merge-XaiPoolIntoBackendEnv -BackendEnv $projectConfig.backendEnv -PoolPath $xaiPoolPath
+# Re-sanitize after pool merge so placeholder values never land in backend/.env
+$projectConfig.backendEnv = Sanitize-EnvMap $projectConfig.backendEnv
+
 $config.updatedAt = (Get-Date).ToString('o')
 
 if (-not (Test-Path $machineConfigRoot)) {
@@ -602,6 +818,18 @@ $backendOrder = @(
   'GEMINI_ANALYSIS_MODEL',
   'GEMINI_TEMPLATE_MODEL',
   'GEMINI_EMBEDDING_MODEL',
+  'XAI_API_KEY',
+  'XAI_API_KEY_1',
+  'XAI_API_KEY_2',
+  'XAI_API_KEY_3',
+  'XAI_ACCOUNT_LABEL',
+  'XAI_ACCOUNT_LABEL_1',
+  'XAI_ACCOUNT_LABEL_2',
+  'XAI_ACCOUNT_LABEL_3',
+  'XAI_API_KEYS',
+  'XAI_KEY_POOL_FILE',
+  'XAI_ACTIVE_ACCOUNT_ID',
+  'XAI_BASE_URL',
   'FIREBASE_PROJECT_ID',
   'FIREBASE_SERVICE_ACCOUNT_JSON',
   'WRITTEN_NEWS_FEEDS',
@@ -670,6 +898,7 @@ Write-Output "Central config: $machineConfigPath"
 Write-Output "Frontend env:   $frontendEnvPath"
 Write-Output "Backend env:    $backendEnvPath"
 Write-Output ("Android FCM:    " + ($(if ($googleServicesCopied) { $androidGoogleServicesPath } elseif (Test-Path $androidGoogleServicesPath) { $androidGoogleServicesPath } else { 'missing google-services.json' })))
+Write-Output ("xAI pool:       " + ($(if (Test-Path $xaiPoolPath) { "$xaiPoolPath (merged $xaiKeysMerged key slot(s) into backendEnv)" } else { "missing $xaiPoolPath" })))
 
 if ($missingFields.Count -gt 0) {
   Write-Output ''

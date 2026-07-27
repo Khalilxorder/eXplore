@@ -81,6 +81,7 @@ import {
   getVideoLibraryCreatorLabel,
   normalizeVideoLibraryPreferences,
 } from '../data/videoLibrary';
+import WoltDemandMonitor from './WoltDemandMonitor';
 
 function formatTimestamp(value) {
   if (!value) {
@@ -1598,28 +1599,50 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
     'messaging private inbox messages direct conversation',
   ].filter(profileSectionVisible).length;
 
+  const geminiKeyCount = Number(modelPoolStatus?.keyCount || 0);
+  const geminiAvailable = Number(modelPoolStatus?.availableKeyCount ?? geminiKeyCount);
+  const geminiDegraded = Boolean(modelPoolStatus?.degraded);
+  const openaiConfigured = Boolean(modelPoolStatus?.openaiConfigured);
+  const aiProviderDiagnosticsAvailable = Boolean(modelPoolStatus);
+  const aiReadinessParts = [];
+  if (geminiDegraded && geminiKeyCount > 0) {
+    aiReadinessParts.push(
+      `${modelPoolStatus?.coolingKeyCount || 0}/${geminiKeyCount} AI routes cooling`,
+    );
+  } else if (geminiKeyCount > 0) {
+    aiReadinessParts.push(
+      `${geminiAvailable} AI route${geminiAvailable === 1 ? '' : 's'} available`,
+    );
+  }
+  if (openaiConfigured && geminiKeyCount === 0) {
+    aiReadinessParts.push('Fallback provider configured');
+  }
+  let aiReadinessStatus = 'unavailable';
+  let aiReadinessMessage = 'AI provider diagnostics are unavailable.';
+  if (aiProviderDiagnosticsAvailable) {
+    if (geminiDegraded && geminiKeyCount > 0) {
+      aiReadinessStatus = 'partial';
+      aiReadinessMessage = `${aiReadinessParts.join('. ')}. Ask AI uses rule fallback until a provider responds.`;
+    } else if (geminiKeyCount > 0 || openaiConfigured) {
+      aiReadinessStatus = geminiDegraded ? 'partial' : 'live';
+      aiReadinessMessage = aiReadinessParts.length
+        ? `${aiReadinessParts.join(' · ')}.`
+        : 'AI provider is configured.';
+    } else {
+      aiReadinessStatus = 'unavailable';
+      aiReadinessMessage = 'No live AI provider is responding. Deterministic ranking remains active.';
+    }
+  }
+
   const readinessCards = systemReadiness ? [
     { key: 'runtime', title: 'Backend', payload: systemReadiness.runtime },
     { key: 'auth', title: 'Auth', payload: systemReadiness.auth },
     {
       key: 'ai',
       title: 'Ask AI',
-      payload: modelPoolStatus ? {
-        status: modelPoolStatus.degraded
-          ? 'partial'
-          : modelPoolStatus.keyCount || modelPoolStatus.openaiConfigured
-            ? 'live'
-            : 'unavailable',
-        message: modelPoolStatus.degraded
-          ? `${modelPoolStatus.coolingKeyCount || 0}/${modelPoolStatus.keyCount || 0} Gemini keys cooling. Ask AI uses rule fallback until a provider responds.`
-          : modelPoolStatus.keyCount
-            ? `${modelPoolStatus.provider || 'AI'} ready with ${modelPoolStatus.availableKeyCount ?? modelPoolStatus.keyCount} available Gemini keys.`
-            : modelPoolStatus.openaiConfigured
-              ? 'OpenAI fallback is configured.'
-              : 'No live AI provider is configured.',
-      } : {
-        status: 'partial',
-        message: 'AI provider diagnostics are unavailable.',
+      payload: {
+        status: aiReadinessStatus,
+        message: aiReadinessMessage,
       },
     },
     { key: 'discovery', title: 'Best Feed', payload: systemReadiness.discovery },
@@ -2089,9 +2112,9 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
                 </div>
 
                 {/* Release watch companies */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <p style={{ font: 'var(--font-micro)', color: 'var(--text-tertiary)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-                    Release watch
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', background: '#F8FAFC', padding: '16px', border: '1px solid #E5E7EB', borderRadius: '8px' }}>
+                  <p style={{ font: 'var(--font-micro)', color: '#F59E0B', letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 'bold' }}>
+                    Release watch (Grok / xAI Focus)
                   </p>
                   <div style={{ display: 'flex', gap: 'var(--space-tight)', flexWrap: 'wrap' }}>
                     <button
@@ -2099,8 +2122,9 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
                       onClick={() => { void toggleReleaseWatchEnabled(); }}
                       disabled={radarBusy}
                       style={{
-                        borderColor: radarSettings.releaseWatch.enabled ? 'var(--accent)' : 'var(--border)',
-                        color: radarSettings.releaseWatch.enabled ? 'var(--accent)' : 'var(--text-secondary)',
+                        borderColor: radarSettings.releaseWatch.enabled ? '#F59E0B' : '#E5E7EB',
+                        color: radarSettings.releaseWatch.enabled ? '#F59E0B' : 'var(--text-secondary)',
+                        backgroundColor: '#FFFFFF'
                       }}
                     >
                       {radarSettings.releaseWatch.enabled ? 'Release watch on' : 'Release watch off'}
@@ -2112,6 +2136,7 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
                           companies: { [companyKey]: true },
                         },
                       })[0]?.label || companyKey;
+                      const isGrok = companyKey === 'xai';
 
                       return (
                         <button
@@ -2120,11 +2145,12 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
                           onClick={() => { void toggleReleaseWatchCompany(companyKey); }}
                           disabled={radarBusy || !radarSettings.releaseWatch.enabled}
                           style={{
-                            borderColor: enabled ? 'var(--accent)' : 'var(--border)',
-                            color: enabled ? 'var(--accent)' : 'var(--text-secondary)',
+                            borderColor: enabled ? (isGrok ? '#F59E0B' : 'var(--accent)') : '#E5E7EB',
+                            color: enabled ? (isGrok ? '#FFFFFF' : 'var(--accent)') : 'var(--text-secondary)',
+                            backgroundColor: enabled && isGrok ? '#F97316' : '#FFFFFF',
                           }}
                         >
-                          {companyLabel}
+                          {companyLabel} {isGrok && enabled && '🔥'}
                         </button>
                       );
                     })}
@@ -2410,6 +2436,11 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
           </div>
         </section>
 
+        {/* ── Wolt Demand Monitor ─────────────────────────────── */}
+        <section style={{ marginBottom: 'var(--space-large)' }}>
+          <WoltDemandMonitor apiBaseUrl={resolvedBackendUrl} />
+        </section>
+
         <section style={{ marginBottom: 'var(--space-large)' }}>
           <div className="section-header">
             <h2 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-tight)' }}>
@@ -2501,14 +2532,14 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
 
         <section style={{ marginBottom: 'var(--space-large)' }}>
           <div className="section-header">
-            <h2 className="section-title">More tools</h2>
+            <h2 className="section-title">Advanced</h2>
             <button className="btn btn-ghost btn-sm" onClick={() => setShowSetupLinks((current) => !current)}>
               {showSetupLinks ? 'Hide' : 'Show'}
             </button>
           </div>
           <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-small)' }}>
             <p style={{ font: 'var(--font-caption)', color: 'var(--text-secondary)' }}>
-              Secondary setup surfaces live here when you need them, without taking over the main product.
+              Sources, saved data, shared spaces, and technical status.
             </p>
             {showSetupLinks && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-tight)' }}>
@@ -2521,29 +2552,17 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
                 <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => onNavigate?.('saved')}>
                   Saved
                 </button>
-                <button className="btn btn-secondary" style={{ flex: 1, borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={() => onNavigate?.('subscription')}>
-                  Subscription setup
-                </button>
-                <button className="btn btn-secondary" style={{ flex: 1, borderColor: 'var(--premium)', color: 'var(--premium)' }} onClick={() => onNavigate?.('family')}>
-                  Family setup
-                </button>
-                <button className="btn btn-secondary" style={{ gridColumn: '1 / -1', borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={() => onNavigate?.('referral')}>
-                  Referral setup
-                </button>
-                <button className="btn btn-secondary" style={{ gridColumn: '1 / -1', borderColor: '#a78bfa', color: '#a78bfa' }} onClick={() => onNavigate?.('mail')}>
-                  📬 Mail Intelligence
-                </button>
                 <button className="btn btn-secondary" style={{ gridColumn: '1 / -1', borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={() => onNavigate?.('formulation')}>
-                  ✍ Distill Golden Formulation
+                  Distill Golden Formulation
                 </button>
                 <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => onNavigate?.('experience')}>
-                  📓 eXperience Journal
+                  eXperience Journal
                 </button>
                 <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => onNavigate?.('shared-experience')}>
                   Shared Experience
                 </button>
                 <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => onNavigate?.('experiment')}>
-                  🧪 eXperiment Track
+                  eXperiment Track
                 </button>
                 {isAdmin && (
                   <button
@@ -2551,7 +2570,7 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
                     style={{ flex: 1, gridColumn: '1 / -1', borderColor: 'var(--accent)', color: 'var(--accent)' }}
                     onClick={() => onNavigate?.('recommender-admin')}
                   >
-                    🤖 Intelligence Engine Admin
+                    Intelligence Engine Admin
                   </button>
                 )}
               </div>
@@ -2559,6 +2578,8 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
           </div>
         </section>
 
+        {showSetupLinks && (
+          <>
         <section style={{ marginBottom: 'var(--space-large)' }}>
           <div className="section-header">
             <h2 className="section-title">System health</h2>
@@ -2694,6 +2715,8 @@ export default function PreferencesScreen({ onBack, onNavigate }) {
             )}
           </div>
         </section>
+          </>
+        )}
 
         <section style={{ marginBottom: 'var(--space-large)' }}>
           <div className="section-header">

@@ -364,7 +364,7 @@ function HeroVisual({ item, sourceTrustBadge, canOpenSource, onOpenSource }) {
   );
 }
 
-function InlineVideoPlayer({ item, sourceTrustBadge, onOpenSource }) {
+function LegacyInlineVideoPlayer({ item, sourceTrustBadge, onOpenSource }) {
   const [ytReady, setYtReady] = useState(typeof window !== 'undefined' && !!window.YT && !!window.YT.Player);
   const iframeRef = useRef(null);
 
@@ -522,6 +522,23 @@ function InlineVideoPlayer({ item, sourceTrustBadge, onOpenSource }) {
           </span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function InlineVideoPlayer({ item, sourceTrustBadge, onOpenSource }) {
+  const videoUrl = String(item?.url || '').trim();
+  const hasVideo = Boolean(buildYouTubeEmbedUrl(videoUrl));
+  if (!hasVideo) {
+    return <HeroVisual item={item} sourceTrustBadge={sourceTrustBadge} canOpenSource={Boolean(videoUrl)} onOpenSource={onOpenSource} />;
+  }
+
+  return (
+    <div style={{ padding: 'var(--space-base)', background: 'linear-gradient(180deg, rgba(15,23,42,.94), rgba(15,23,42,.99))', color: '#fff' }}>
+      <span className="badge badge-accent">Controlled playback</span>
+      <h3 style={{ margin: '10px 0 6px' }}>{item?.title || 'YouTube video'}</h3>
+      <p style={{ margin: '0 0 14px', color: '#cbd5e1' }}>Review verified metadata, transcript availability, and your research purpose before playback.</p>
+      <button type="button" className="btn btn-primary" onClick={onOpenSource}>Open controlled research gate</button>
     </div>
   );
 }

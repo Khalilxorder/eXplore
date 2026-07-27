@@ -15,6 +15,7 @@ const localDevOrigins = Array.from(new Set([
     .filter((entry) => entry?.family === 'IPv4' && !entry.internal)
     .map((entry) => entry.address),
 ])).filter(Boolean);
+const disableWebpackCache = process.env.EXPLORE_DISABLE_WEBPACK_CACHE === '1';
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -48,6 +49,12 @@ const nextConfig = {
   trailingSlash: true,
   experimental: {
     cpus: 1,
+  },
+  webpack(config) {
+    if (disableWebpackCache) {
+      config.cache = false;
+    }
+    return config;
   },
 };
 

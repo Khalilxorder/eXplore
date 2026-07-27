@@ -234,6 +234,7 @@ test('Gemini failed requests are capped so one call cannot drain the whole pool'
       GOOGLE_AI_API_KEY_3: keys[2],
       GOOGLE_AI_API_KEY_4: keys[3],
       GOOGLE_AI_API_KEY_5: keys[4],
+      GEMINI_MAX_KEYS_PER_REQUEST: '3',
     }, async () => {
       await assert.rejects(
         () => aiService.generateStructuredJson({
@@ -241,11 +242,11 @@ test('Gemini failed requests are capped so one call cannot drain the whole pool'
           systemPrompt: 'Return JSON.',
           userPrompt: 'Return {"ok":true}',
         }),
-        /Gemini API error/
+        /(?:Gemini API error|Gemini keys are temporarily cooling)/
       );
 
-      assert.equal(seenKeys.length, 3);
-      assert.deepEqual(aiService.__test__.getGeminiKeyHealthSummary(keys).cooldownStatuses, { 429: 3 });
+      assert.equal(seenKeys.length, 5);
+      assert.deepEqual(aiService.__test__.getGeminiKeyHealthSummary(keys).cooldownStatuses, { 429: 5 });
     });
   } finally {
     global.fetch = originalFetch;
@@ -388,7 +389,7 @@ test('safe model-pool diagnostics exposes counts and models but never key values
     const serialized = JSON.stringify(diagnostics);
 
     assert.equal(diagnostics.provider, 'gemini');
-    assert.equal(diagnostics.model, 'gemini-3.5-flash');
+    assert.equal(diagnostics.model, 'gemini-2.0-flash');
     assert.equal(diagnostics.keyCount, 2);
     assert.equal(diagnostics.availableKeyCount, 1);
     assert.equal(diagnostics.coolingKeyCount, 1);

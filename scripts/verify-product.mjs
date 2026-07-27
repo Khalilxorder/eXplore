@@ -81,6 +81,17 @@ const steps = [
 
 console.log(`${colors.bold}${colors.cyan}=== Starting Product Verification Gate ===${colors.reset}\n`);
 
+// Strip system proxy env vars so localhost smoke-test requests are not routed
+// through a corporate or OS-level HTTP proxy (common on Windows).
+const childEnv = { ...process.env };
+for (const key of Object.keys(childEnv)) {
+  if (/^https?_proxy$/i.test(key)) {
+    delete childEnv[key];
+  }
+}
+childEnv.NO_PROXY = 'localhost,127.0.0.1,::1';
+childEnv.no_proxy = 'localhost,127.0.0.1,::1';
+
 const results = [];
 let anyCodeFailure = false;   // red
 let anyExternalWarning = false; // yellow
@@ -89,7 +100,7 @@ for (const step of steps) {
   console.log(`${colors.bold}Running: ${step.name}...${colors.reset}`);
   const start = Date.now();
 
-  const result = spawnSync(step.cmd, step.args, { stdio: 'inherit', shell: true });
+  const result = spawnSync(step.cmd, step.args, { stdio: 'inherit', shell: true, env: childEnv });
   const duration = ((Date.now() - start) / 1000).toFixed(2);
   const passed = result.status === 0;
 

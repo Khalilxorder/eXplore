@@ -320,6 +320,11 @@ function shouldDeliverPriorityAlert(alert = {}, preferences = {}) {
     return Boolean(preferences.geo_enabled || preferences.political_enabled);
   }
 
+  if (alert.category === 'wolt_demand') {
+    // Wolt demand alerts always pass if global push is enabled (config gating happens at the service level)
+    return true;
+  }
+
   if (alert.category !== 'ai') {
     return false;
   }

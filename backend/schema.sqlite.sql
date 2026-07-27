@@ -966,3 +966,48 @@ CREATE TABLE IF NOT EXISTS source_web_evidence (
   confidence REAL DEFAULT 0.5,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS topic_research_runs (
+  id TEXT PRIMARY KEY,
+  topic_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'complete',
+  provider TEXT,
+  model TEXT,
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_topic_research_runs_topic
+  ON topic_research_runs (topic_id, user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS wolt_monitor_configs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL UNIQUE,
+  enabled INTEGER DEFAULT 0,
+  auth_token TEXT,
+  city_id TEXT,
+  venue_id TEXT,
+  check_interval_minutes INTEGER DEFAULT 2,
+  min_notify_level TEXT DEFAULT 'SUPPLY_STATE_EXPECT_SOON',
+  notify_hotspots INTEGER DEFAULT 1,
+  sound_enabled INTEGER DEFAULT 1,
+  vibration_enabled INTEGER DEFAULT 1,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS wolt_demand_snapshots (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  supply_state TEXT NOT NULL,
+  hotspots_count INTEGER DEFAULT 0,
+  demand_level_label TEXT,
+  forecast_json TEXT DEFAULT '[]',
+  raw_response_json TEXT DEFAULT '{}',
+  transition_event TEXT,
+  fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_wolt_snapshots_user_fetched ON wolt_demand_snapshots (user_id, fetched_at DESC);

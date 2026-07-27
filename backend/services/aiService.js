@@ -7,11 +7,17 @@ const OpenAI = require('openai');
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const MAX_GEMINI_KEY_SLOTS = 100;
-const DEFAULT_GEMINI_FLASH_LITE_MODEL = 'gemini-3.5-flash';
+// Prefer widely available Flash models. 3.5 often returns 503 under load.
+const DEFAULT_GEMINI_FLASH_LITE_MODEL = process.env.GEMINI_DEFAULT_MODEL || 'gemini-2.0-flash';
+const GEMINI_MODEL_FALLBACK_CHAIN = [
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-001',
+  'gemini-3.5-flash',
+];
 const INVALID_GEMINI_MODEL_ALIASES = new Map([
-  ['gemini-2.5-flash-lite', 'gemini-3.5-flash'],
-  ['gemini-2.5-flash', 'gemini-3.5-flash'],
-  ['gemini-3.5-flash-lite', 'gemini-3.5-flash'],
+  // Keep explicit 3.5 requests, but do not force everything onto 3.5.
+  ['gemini-3.5-flash-lite', 'gemini-2.0-flash'],
+  ['gemini-2.5-flash-lite', 'gemini-2.0-flash'],
 ]);
 
 function normalizeGeminiModelName(value, fallback = DEFAULT_GEMINI_FLASH_LITE_MODEL) {
@@ -21,6 +27,18 @@ function normalizeGeminiModelName(value, fallback = DEFAULT_GEMINI_FLASH_LITE_MO
   }
 
   return INVALID_GEMINI_MODEL_ALIASES.get(normalized.toLowerCase()) || normalized;
+}
+
+function geminiModelCandidates(preferred) {
+  const primary = normalizeGeminiModelName(preferred, DEFAULT_GEMINI_FLASH_LITE_MODEL);
+  const ordered = [primary, ...GEMINI_MODEL_FALLBACK_CHAIN];
+  const seen = new Set();
+  return ordered.filter((model) => {
+    const key = String(model || '').toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 const GEMINI_FLASH_LITE_MODEL = normalizeGeminiModelName(
@@ -540,26 +558,46 @@ async function generateGeminiJson(promptText, options = {}) {
     temperature = 0.2,
   } = options;
 
-  return executeGeminiRequest({
-    model,
-    action: 'generateContent',
-    body: {
-      contents: [
-        {
-          parts: [{ text: promptText }],
+  const candidates = geminiModelCandidates(model);
+  let lastError = null;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    try {
+      return await executeGeminiRequest({
+        model: candidate,
+        action: 'generateContent',
+        body: {
+          contents: [
+            {
+              parts: [{ text: promptText }],
+            },
+          ],
+          generationConfig: {
+            temperature,
+            responseMimeType: 'application/json',
+          },
         },
-      ],
-      generationConfig: {
-        temperature,
-      },
-    },
-    parser: async (response) => {
-      const payload = await response.json();
-      return JSON.parse(cleanJsonPayload(extractGeminiText(payload)));
-    },
-    maxKeyAttempts: options.maxKeyAttempts,
-    includeCoolingFallback: options.includeCoolingFallback,
-  });
+        parser: async (response) => {
+          const payload = await response.json();
+          return JSON.parse(cleanJsonPayload(extractGeminiText(payload)));
+        },
+        maxKeyAttempts: options.maxKeyAttempts,
+        includeCoolingFallback: options.includeCoolingFallback,
+      });
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error || '');
+      const retriableModel =
+        /\b(503|429|404|not found|high demand|UNAVAILABLE|overloaded)\b/i.test(message);
+      if (!retriableModel || i === candidates.length - 1) {
+        throw error;
+      }
+      console.warn(`[AI] Gemini model ${candidate} failed; trying next model: ${message.slice(0, 180)}`);
+    }
+  }
+
+  throw lastError || new Error('Gemini JSON generation failed for all model candidates.');
 }
 
 async function generateGeminiEmbedding(text, options = {}) {

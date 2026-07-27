@@ -1,6 +1,16 @@
 'use strict';
 
 const crypto = require('crypto');
+const aiService = require('../../services/aiService');
+
+const MAX_TOPIC_EVENT_AGE_HOURS = 72;
+const MAX_SOURCE_SUGGESTIONS = 20;
+const TOPIC_STOP_WORDS = new Set([
+  'about', 'after', 'again', 'also', 'because', 'before', 'being', 'could', 'from',
+  'have', 'into', 'most', 'only', 'other', 'should', 'their', 'there', 'these',
+  'they', 'this', 'those', 'through', 'very', 'what', 'when', 'where', 'which',
+  'while', 'with', 'would', 'watch', 'important', 'monitor', 'news', 'topic',
+]);
 
 const TOPIC_FIELDS = [
   ['owner_user_id', 'TEXT'],
@@ -68,7 +78,7 @@ function parseJson(value, fallback = []) {
   try {
     const parsed = JSON.parse(String(value || ''));
     return parsed ?? fallback;
-  } catch (error) {
+  } catch {
     return fallback;
   }
 }
@@ -160,6 +170,19 @@ function ensureTables(db) {
       confidence REAL DEFAULT 0.5,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS topic_research_runs (
+      id TEXT PRIMARY KEY,
+      topic_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'complete',
+      provider TEXT,
+      model TEXT,
+      result_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_topic_research_runs_topic
+      ON topic_research_runs (topic_id, user_id, created_at DESC);
   `);
 }
 
@@ -218,6 +241,112 @@ function shouldSuggest(source, instruction) {
   const text = normalizeText(instruction).toLowerCase();
   return source.keywords.some((keyword) => text.includes(keyword))
     || source.category === 'independent_reporting';
+}
+
+function normalizePublicUrl(value) {
+  const raw = normalizeText(value);
+  if (!raw) {
+    throw new Error('A source URL is required.');
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('Enter a complete http or https source URL.');
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Only http and https source URLs are supported.');
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (
+    host === 'localhost'
+    || host === '127.0.0.1'
+    || host === '0.0.0.0'
+    || host === '::1'
+    || /^10\./.test(host)
+    || /^192\.168\./.test(host)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  ) {
+    throw new Error('Private or local source URLs cannot be monitored.');
+  }
+
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function sourceNameFromUrl(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return 'Source';
+  }
+}
+
+function clampInteger(value, min, max, fallback) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
+}
+
+function topicTerms(topic) {
+  const source = [
+    topic?.name,
+    topic?.instruction,
+    topic?.intended_outcome,
+    ...(topic?.included_concepts || []),
+    ...(topic?.entities || []),
+    ...(topic?.locations || []),
+    ...(topic?.search_queries || []),
+  ].join(' ').toLowerCase();
+
+  return [...new Set(
+    source
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .split(/\s+/)
+      .map((term) => term.trim())
+      .filter((term) => term.length >= 3 && !TOPIC_STOP_WORDS.has(term)),
+  )].slice(0, 60);
+}
+
+function scoreTopicItem(topic, item, approvedSourceIds) {
+  const title = normalizeText(item.title).toLowerCase();
+  const body = normalizeText([
+    item.summary,
+    item.article_body,
+    item.transcript,
+    item.topic_tags_json,
+  ].join(' ')).toLowerCase();
+  const excluded = (topic.excluded_concepts || [])
+    .map((entry) => normalizeText(entry).toLowerCase())
+    .filter(Boolean);
+  if (excluded.some((entry) => title.includes(entry) || body.includes(entry))) {
+    return null;
+  }
+
+  const terms = topicTerms(topic);
+  const titleMatches = terms.filter((term) => title.includes(term));
+  const bodyMatches = terms.filter((term) => !titleMatches.includes(term) && body.includes(term));
+  const approvedBoost = approvedSourceIds.has(item.source_id) ? 18 : 0;
+  const trust = Number(item.trust_score || 0) * 12;
+  const lifeImpact = Number(item.life_impact || 0) * 10;
+  const usefulness = Number(item.decision_usefulness || 0) * 12;
+  const depth = Number(item.depth_score || 0) * 8;
+  const score = (titleMatches.length * 14)
+    + (bodyMatches.length * 4)
+    + approvedBoost
+    + trust
+    + lifeImpact
+    + usefulness
+    + depth;
+
+  if (score < 8) return null;
+  return {
+    score: Number(score.toFixed(1)),
+    matched_terms: [...titleMatches, ...bodyMatches].slice(0, 8),
+    approved_source: approvedBoost > 0,
+  };
 }
 
 function getSourceSuggestions(instruction = '') {
@@ -426,6 +555,304 @@ function suggestSources(db, userId, topicId) {
   return rows;
 }
 
+function saveSuggestedSource(db, userId, topicId, input = {}) {
+  const url = normalizePublicUrl(input.url);
+  const source = upsertCatalogSource(db, {
+    platform: normalizeText(input.platform || 'web') || 'web',
+    name: normalizeText(input.name || sourceNameFromUrl(url)).slice(0, 160),
+    url,
+    trust_tier: clampInteger(input.trust_tier ?? input.trustTier, 1, 4, 3),
+    category: normalizeText(input.category || 'topic_source') || 'topic_source',
+  });
+  const status = ['approved', 'suggested'].includes(normalizeText(input.status).toLowerCase())
+    ? normalizeText(input.status).toLowerCase()
+    : 'suggested';
+  const role = normalizeText(input.role || input.source_role || source.category || 'source').slice(0, 80);
+  const notes = normalizeText(input.reason || input.notes || '').slice(0, 600);
+
+  db.prepare(`
+    INSERT INTO topic_sources (
+      id, topic_id, source_id, user_id, status, source_role, notes, approved_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(topic_id, source_id) DO UPDATE SET
+      status = CASE
+        WHEN topic_sources.status = 'approved' THEN topic_sources.status
+        ELSE excluded.status
+      END,
+      source_role = excluded.source_role,
+      notes = excluded.notes,
+      approved_at = CASE
+        WHEN topic_sources.status = 'approved' THEN topic_sources.approved_at
+        ELSE excluded.approved_at
+      END,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    crypto.randomUUID(),
+    topicId,
+    source.id,
+    userId,
+    status,
+    role,
+    notes,
+    status === 'approved' ? new Date().toISOString() : null,
+  );
+
+  return {
+    ...source,
+    status,
+    approval_status: status,
+    role,
+    suggestion_reason: notes,
+  };
+}
+
+function addTopicSource(db, userId, topicId, input = {}) {
+  const topic = getTopic(db, userId, topicId);
+  if (!topic) return null;
+  return saveSuggestedSource(db, userId, topicId, {
+    ...input,
+    status: input.approved === true ? 'approved' : (input.status || 'suggested'),
+    reason: input.reason || input.notes || 'Added manually for this topic.',
+  });
+}
+
+function removeTopicSource(db, userId, topicId, sourceId) {
+  const topic = getTopic(db, userId, topicId);
+  if (!topic) return false;
+  const result = db.prepare(`
+    DELETE FROM topic_sources
+    WHERE topic_id = ? AND source_id = ? AND user_id = ?
+  `).run(topicId, sourceId, userId);
+  return Number(result.changes || 0) > 0;
+}
+
+async function discoverSourcesWithAi(db, userId, topicId, options = {}) {
+  const topic = getTopic(db, userId, topicId);
+  if (!topic) return null;
+  const deterministic = suggestSources(db, userId, topicId) || [];
+  const limit = clampInteger(options.limit, 4, MAX_SOURCE_SUGGESTIONS, 12);
+  const existing = topic.suggested_sources || [];
+
+  const systemPrompt = [
+    'You build a high-trust monitoring map for eXplore.',
+    'Return only valid JSON shaped as {"sources":[...]} with at most the requested number of sources.',
+    'Each source must contain name, url, role, category, trust_tier, and reason.',
+    'Prefer official primary sources, then strong independent corroboration, then specialist sources.',
+    'Use canonical public http/https URLs. Do not invent a URL when you are uncertain.',
+    'Do not include social search pages, generic homepages with no relevance, duplicates, localhost, or private networks.',
+  ].join(' ');
+  const userPrompt = JSON.stringify({
+    task: 'Suggest valuable source connections for this monitored topic.',
+    limit,
+    topic: {
+      name: topic.name,
+      instruction: topic.instruction,
+      intended_outcome: topic.intended_outcome,
+      entities: topic.entities,
+      locations: topic.locations,
+      languages: topic.languages,
+      search_queries: topic.search_queries,
+    },
+    already_known_urls: existing.map((source) => source.url).filter(Boolean),
+  });
+
+  let generated = [];
+  let aiError = '';
+  try {
+    const result = await aiService.generateStructuredJson({
+      systemPrompt,
+      userPrompt,
+      providerPreference: 'auto',
+      temperature: 0.1,
+      maxKeyAttempts: 4,
+    });
+    generated = Array.isArray(result?.sources) ? result.sources : [];
+  } catch (error) {
+    aiError = aiService.__test__?.sanitizeAiErrorMessage
+      ? aiService.__test__.sanitizeAiErrorMessage(error)
+      : normalizeText(error?.message || 'AI source discovery failed.');
+  }
+
+  const saved = [];
+  const seenUrls = new Set(existing.map((source) => source.url).filter(Boolean));
+  for (const candidate of generated.slice(0, limit)) {
+    try {
+      const url = normalizePublicUrl(candidate?.url);
+      if (seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      saved.push(saveSuggestedSource(db, userId, topicId, {
+        ...candidate,
+        url,
+        status: 'suggested',
+        reason: `AI candidate - ${normalizeText(candidate?.reason || 'Potentially valuable connection.')} Verify before approval.`,
+      }));
+    } catch {
+      // Invalid or private candidates are discarded rather than surfaced.
+    }
+  }
+
+  return {
+    suggestions: [...saved, ...deterministic]
+      .filter((source, index, rows) => rows.findIndex((entry) => entry.url === source.url) === index)
+      .slice(0, MAX_SOURCE_SUGGESTIONS),
+    generated_count: saved.length,
+    fallback_used: saved.length === 0,
+    error: aiError,
+    model_pool: aiService.getSafeModelPoolDiagnostics(),
+  };
+}
+
+function getTopicEvents(db, userId, topicId, options = {}) {
+  const topic = getTopic(db, userId, topicId);
+  if (!topic) return null;
+  const limit = clampInteger(options.limit, 1, 50, 20);
+  const ageHours = clampInteger(options.ageHours, 1, MAX_TOPIC_EVENT_AGE_HOURS, MAX_TOPIC_EVENT_AGE_HOURS);
+  const approvedSources = db.prepare(`
+    SELECT source_id
+    FROM topic_sources
+    WHERE topic_id = ? AND user_id = ? AND status = 'approved'
+  `).all(topicId, userId);
+  const approvedSourceIds = new Set(approvedSources.map((row) => row.source_id));
+  const rows = db.prepare(`
+    SELECT
+      ci.id, ci.source_id, ci.title, ci.url, ci.thumbnail_url, ci.publish_date,
+      ci.summary, ci.article_body, ci.transcript, ci.topic_tags_json, ci.content_type,
+      ci.channel_type, ci.trust_score, ci.depth_score, ci.life_impact,
+      ci.decision_usefulness, ci.created_at,
+      s.name AS source_name, s.trust_tier AS source_trust_tier
+    FROM content_items ci
+    LEFT JOIN sources s ON s.id = ci.source_id
+    WHERE datetime(COALESCE(ci.publish_date, ci.created_at)) >= datetime('now', ?)
+    ORDER BY datetime(COALESCE(ci.publish_date, ci.created_at)) DESC
+    LIMIT 500
+  `).all(`-${ageHours} hours`);
+
+  return rows
+    .map((item) => {
+      const match = scoreTopicItem(topic, item, approvedSourceIds);
+      if (!match) return null;
+      return {
+        id: item.id,
+        title: item.title,
+        url: item.url,
+        thumbnail_url: item.thumbnail_url || null,
+        published_at: item.publish_date || item.created_at,
+        summary: item.summary || '',
+        source: item.source_name || 'Unknown source',
+        source_trust_tier: item.source_trust_tier || null,
+        content_type: item.content_type || item.channel_type || 'article',
+        relevance_score: match.score,
+        matched_terms: match.matched_terms,
+        approved_source: match.approved_source,
+        reason: match.approved_source
+          ? 'Matches this topic and comes from an approved connection.'
+          : `Matches ${match.matched_terms.slice(0, 3).join(', ') || 'the topic instruction'}.`,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.relevance_score - a.relevance_score
+      || Date.parse(b.published_at || 0) - Date.parse(a.published_at || 0))
+    .slice(0, limit);
+}
+
+function listResearchRuns(db, userId, topicId, limit = 10) {
+  ensureTables(db);
+  return db.prepare(`
+    SELECT id, topic_id, status, provider, model, result_json, error, created_at
+    FROM topic_research_runs
+    WHERE topic_id = ? AND user_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(topicId, userId, clampInteger(limit, 1, 30, 10)).map((row) => ({
+    ...row,
+    result: parseJson(row.result_json, {}),
+  }));
+}
+
+async function runDeepResearch(db, userId, topicId) {
+  const topic = getTopic(db, userId, topicId);
+  if (!topic) return null;
+  const events = getTopicEvents(db, userId, topicId, { limit: 20 }) || [];
+  const approvedSources = (topic.suggested_sources || []).filter((source) => source.status === 'approved');
+  const systemPrompt = [
+    'You are the bounded deep-research analyst inside eXplore.',
+    'Use only the supplied topic, approved sources, and indexed evidence.',
+    'Never claim that a source was read if only its URL was supplied.',
+    'Separate evidence, inference, uncertainty, and next research steps.',
+    'Return only JSON with summary, important_changes, evidence_map, uncertainties, actions, and next_questions.',
+  ].join(' ');
+  const userPrompt = JSON.stringify({
+    topic: {
+      name: topic.name,
+      instruction: topic.instruction,
+      intended_outcome: topic.intended_outcome,
+      priority: topic.importance_threshold,
+    },
+    approved_sources: approvedSources.map((source) => ({
+      name: source.name,
+      url: source.url,
+      role: source.role,
+    })),
+    indexed_evidence_last_72_hours: events.map((event) => ({
+      title: event.title,
+      source: event.source,
+      published_at: event.published_at,
+      summary: event.summary,
+      url: event.url,
+      relevance_score: event.relevance_score,
+    })),
+  });
+
+  const id = crypto.randomUUID();
+  let result;
+  let status = 'complete';
+  let errorText = '';
+  try {
+    result = await aiService.generateStructuredJson({
+      systemPrompt,
+      userPrompt,
+      providerPreference: 'auto',
+      temperature: 0.15,
+      maxKeyAttempts: 4,
+    });
+  } catch (error) {
+    status = 'degraded';
+    errorText = normalizeText(error?.message || 'AI synthesis unavailable.').slice(0, 500);
+    result = {
+      summary: events.length
+        ? `${events.length} recent items match this topic. AI synthesis was unavailable, so the evidence is listed without added interpretation.`
+        : 'No indexed evidence matched this topic in the last 72 hours.',
+      important_changes: events.slice(0, 5).map((event) => event.title),
+      evidence_map: events.slice(0, 10).map((event) => ({
+        claim: event.title,
+        source: event.source,
+        url: event.url,
+      })),
+      uncertainties: ['The AI synthesis provider was unavailable for this run.'],
+      actions: ['Review the approved sources and the evidence links directly.'],
+      next_questions: ['Which approved source should be checked next?'],
+    };
+  }
+
+  const diagnostics = aiService.getSafeModelPoolDiagnostics();
+  db.prepare(`
+    INSERT INTO topic_research_runs (
+      id, topic_id, user_id, status, provider, model, result_json, error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    topicId,
+    userId,
+    status,
+    diagnostics.provider || null,
+    diagnostics.model || null,
+    JSON.stringify(result || {}),
+    errorText || null,
+  );
+
+  return listResearchRuns(db, userId, topicId, 1)[0] || null;
+}
+
 function setSourceApproval(db, userId, topicId, sourceId, approved, notes = '', statusOverride = null) {
   const topic = getTopic(db, userId, topicId);
   if (!topic) return null;
@@ -555,10 +982,23 @@ module.exports = {
   createTopic,
   updateTopic,
   suggestSources,
+  discoverSourcesWithAi,
+  addTopicSource,
+  removeTopicSource,
   setSourceApproval,
+  getTopicEvents,
+  listResearchRuns,
+  runDeepResearch,
   getSourceWeb,
   getSourceSuggestions,
   ensureJordanIranTopic,
   topicRowToJson,
-  __test__: { slugify, topicPayload, shouldSuggest },
+  __test__: {
+    slugify,
+    topicPayload,
+    shouldSuggest,
+    normalizePublicUrl,
+    topicTerms,
+    scoreTopicItem,
+  },
 };

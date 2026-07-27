@@ -1449,7 +1449,7 @@ export default function TemplateScreen({ onBack, onNavigate, embedded }) {
 
         
         {/* ── TOPICS NET ── */}
-        <section className="card workspace-section-card" style={{ padding: 'var(--space-medium)', display: 'flex', flexDirection: 'column', gap: 'var(--space-large)', marginBottom: 'var(--space-large)', background: 'var(--surface)', border: '1px solid var(--border-soft)' }}>
+        <section className="card workspace-section-card" style={{ padding: 'var(--space-medium)', display: 'flex', flexDirection: 'column', gap: 'var(--space-large)', marginBottom: 'var(--space-large)', background: '#FFFFFF', border: '1px solid #E5E7EB' }}>
           <div>
             <h2 className="section-title">Topics NET</h2>
             <p style={{ font: 'var(--font-caption)', color: 'var(--text-secondary)', marginTop: '6px' }}>
@@ -1687,7 +1687,7 @@ export default function TemplateScreen({ onBack, onNavigate, embedded }) {
         </section>
 
         {/* ── REFERENCES NET ── */}
-        <section className="card workspace-section-card" style={{ padding: 'var(--space-medium)', display: 'flex', flexDirection: 'column', gap: 'var(--space-base)', marginBottom: 'var(--space-large)' }}>
+        <section className="card workspace-section-card" style={{ padding: 'var(--space-medium)', display: 'flex', flexDirection: 'column', gap: 'var(--space-base)', marginBottom: 'var(--space-large)', background: '#FFFFFF', border: '1px solid #E5E7EB' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', alignItems: 'center' }}>
             <div>
               <h2 className="section-title">References NET</h2>
@@ -1706,22 +1706,26 @@ export default function TemplateScreen({ onBack, onNavigate, embedded }) {
             </div>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-small)' }}>
-            <span className="workspace-doc-kicker">Topic: AI / Tech Releases</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-small)', background: '#F8FAFC', padding: '16px', border: '1px solid #E5E7EB', borderRadius: '8px' }}>
+            <span className="workspace-doc-kicker" style={{ color: '#F59E0B' }}>Topic: AI / Tech Releases (Grok Focus)</span>
             
-            <div className="workspace-memory-panel" style={{ background: 'var(--surface)', padding: 'var(--space-small)', borderRadius: '10px' }}>
-              <label className="workspace-sheet-label">AI Platforms (OpenAI, Anthropic, etc)</label>
+            <div className="workspace-memory-panel" style={{ background: '#FFFFFF', padding: 'var(--space-small)', borderRadius: '10px', border: '1px solid #E5E7EB' }}>
+              <label className="workspace-sheet-label">AI Platforms (OpenAI, Anthropic, Grok/xAI)</label>
               <div style={{ display: 'flex', gap: 'var(--space-tight)', flexWrap: 'wrap', paddingBottom: 'var(--space-tight)' }}>
-                {RELEASE_WATCH_COMPANIES.map((company) => (
+                {RELEASE_WATCH_COMPANIES.map((company) => {
+                  const isGrok = company.key === 'xai';
+                  const isActive = trackedCompaniesDraft.includes(company.key);
+                  return (
                   <button
                     key={company.key}
                     type="button"
-                    className={`chip ${trackedCompaniesDraft.includes(company.key) ? 'active' : ''}`}
+                    className={`chip ${isActive ? 'active' : ''}`}
                     onClick={() => toggleTrackedCompany(company.key)}
+                    style={isActive && isGrok ? { backgroundColor: '#F97316', color: '#FFFFFF', borderColor: '#F59E0B' } : {}}
                   >
-                    {company.label}
+                    {company.label} {isGrok && isActive && '🔥'}
                   </button>
-                ))}
+                )})}
               </div>
             </div>
             

@@ -4,6 +4,10 @@ import { isNativeShell } from './mobile';
 export const API_BASE_OVERRIDE_KEY = 'explore-api-base';
 export const AUTH_REQUIRED_EVENT = 'explore-auth-required';
 const HOSTED_WEB_API_BASE = '/_/backend';
+// Production native (Capacitor/Android release) always targets the public hosted API.
+// Do not point release builds at private LAN hosts — use `npm run android:release`,
+// not `npm run android:live` (LAN live-reload requires same Wi-Fi as the dev PC).
+// Root capacitor.config.json must omit server.url so release does not bake a LAN URL.
 const HOSTED_NATIVE_API_BASE = 'https://explore-two-rho.vercel.app/_/backend';
 
 function normalizeBaseUrl(value) {
@@ -22,12 +26,40 @@ function isNativeProduction() {
   return isNativeShell() && process.env.NODE_ENV === 'production';
 }
 
+/**
+ * Absolute public API bases only (no relative paths, no private LAN hosts).
+ * Used so production native shells never dial 10.x / 192.168.x / localhost.
+ */
+function tryPublicApiBase(value) {
+  if (!value) {
+    return '';
+  }
+
+  const normalizedValue = normalizeBaseUrl(value);
+  if (!normalizedValue || normalizedValue.startsWith('/')) {
+    return '';
+  }
+
+  const parsed = parseUrlSafely(normalizedValue);
+  if (!parsed || isPrivateHostname(parsed.hostname)) {
+    return '';
+  }
+
+  return normalizedValue;
+}
+
 function isDebugApiOverrideEnabled() {
+  // Release/native production APKs must never honor localStorage API overrides
+  // (including when NEXT_PUBLIC_DEBUG_BACKEND_OVERRIDE was baked at build time).
+  if (isNativeProduction()) {
+    return false;
+  }
+
   if (process.env.NEXT_PUBLIC_DEBUG_BACKEND_OVERRIDE === 'true') {
     return true;
   }
 
-  if (typeof window === 'undefined' || isNativeProduction()) {
+  if (typeof window === 'undefined') {
     return false;
   }
 
@@ -127,15 +159,10 @@ function resolveEnvApiBase() {
   const envBase = process.env.NEXT_PUBLIC_API_URL;
   if (envBase) {
     const normalizedEnvBase = normalizeBaseUrl(envBase);
-    if (isNativeProduction()) {
-      if (normalizedEnvBase.startsWith('/')) {
-        return HOSTED_NATIVE_API_BASE;
-      }
 
-      const nativeEnvUrl = parseUrlSafely(normalizedEnvBase);
-      return nativeEnvUrl && !isPrivateHostname(nativeEnvUrl.hostname)
-        ? normalizedEnvBase
-        : HOSTED_NATIVE_API_BASE;
+    // Production Capacitor/Android: never keep a private LAN or relative env base.
+    if (isNativeProduction()) {
+      return tryPublicApiBase(normalizedEnvBase) || HOSTED_NATIVE_API_BASE;
     }
 
     if (normalizedEnvBase.startsWith('/')) {
@@ -144,10 +171,6 @@ function resolveEnvApiBase() {
 
     const envUrl = parseUrlSafely(normalizedEnvBase);
     const siteUrl = parseUrlSafely(process.env.NEXT_PUBLIC_SITE_URL || '');
-
-    if (envUrl && isNativeShell() && process.env.NODE_ENV === 'production' && isPrivateHostname(envUrl.hostname)) {
-      return HOSTED_NATIVE_API_BASE;
-    }
 
     if (shouldIgnorePrivateEnvApiBase(envUrl)) {
       return HOSTED_WEB_API_BASE;
@@ -188,14 +211,32 @@ function resolveEnvApiBase() {
   return HOSTED_WEB_API_BASE;
 }
 
+/**
+ * Ordered API base candidates for apiFetch failover.
+ *
+ * Native production (store/side-load APK, off-LAN) order:
+ *   1. NEXT_PUBLIC_MOBILE_API_URL — only if absolute + public (not private LAN)
+ *   2. NEXT_PUBLIC_API_URL via resolveEnvApiBase() — private/relative → hosted
+ *   3. HOSTED_NATIVE_API_BASE (always appended as last-resort)
+ *
+ * Dev / LAN-live (`npm run android:live`) may use private hosts; that path is
+ * same-Wi-Fi only. Release builds: `npm run android:release` + static `out/` +
+ * capacitor.config.json without server.url (never bake a LAN live-reload URL).
+ */
 export function resolveApiBaseCandidates() {
   const candidates = [];
   const mobileApiBase = process.env.NEXT_PUBLIC_MOBILE_API_URL;
   const nativeProduction = isNativeProduction();
+
   if (mobileApiBase && isNativeShell()) {
-    addUniqueCandidate(candidates, mobileApiBase);
+    if (nativeProduction) {
+      addUniqueCandidate(candidates, tryPublicApiBase(mobileApiBase));
+    } else {
+      addUniqueCandidate(candidates, mobileApiBase);
+    }
   }
 
+  // Debug localStorage override is disabled in native production (see isDebugApiOverrideEnabled).
   const override = getApiBaseOverride();
   addUniqueCandidate(candidates, override);
 
@@ -206,7 +247,9 @@ export function resolveApiBaseCandidates() {
   const envBase = resolveEnvApiBase();
   addUniqueCandidate(candidates, envBase);
 
-  if (!isNativeShell()) {
+  if (nativeProduction) {
+    addUniqueCandidate(candidates, HOSTED_NATIVE_API_BASE);
+  } else if (!isNativeShell()) {
     addUniqueCandidate(candidates, HOSTED_WEB_API_BASE);
     addUniqueCandidate(candidates, '/api');
   }
@@ -488,9 +531,26 @@ export async function updateTopic(topicId, payload) {
   });
 }
 
-export async function discoverTopicSources(topicId) {
+export async function discoverTopicSources(topicId, options = {}) {
   return apiFetch(`/api/v1/topics/${encodeURIComponent(topicId)}/discover-sources`, {
     method: 'POST',
+    body: JSON.stringify({
+      mode: options.mode || 'ai',
+      limit: options.limit || 12,
+    }),
+  });
+}
+
+export async function addTopicSource(topicId, payload) {
+  return apiFetch(`/api/v1/topics/${encodeURIComponent(topicId)}/sources`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function removeTopicSource(topicId, sourceId) {
+  return apiFetch(`/api/v1/topics/${encodeURIComponent(topicId)}/sources/${encodeURIComponent(sourceId)}`, {
+    method: 'DELETE',
   });
 }
 
@@ -498,6 +558,24 @@ export async function setTopicSourceApproval(topicId, sourceId, approved, notes 
   return apiFetch(`/api/v1/topics/${encodeURIComponent(topicId)}/sources/${encodeURIComponent(sourceId)}`, {
     method: 'PUT',
     body: JSON.stringify({ approved, notes, status }),
+  });
+}
+
+export async function fetchTopicEvents(topicId, options = {}) {
+  const params = new URLSearchParams({
+    limit: String(options.limit || 20),
+    ageHours: String(options.ageHours || 72),
+  });
+  return apiFetch(`/api/v1/topics/${encodeURIComponent(topicId)}/events?${params.toString()}`);
+}
+
+export async function fetchTopicResearch(topicId, limit = 10) {
+  return apiFetch(`/api/v1/topics/${encodeURIComponent(topicId)}/research?limit=${encodeURIComponent(limit)}`);
+}
+
+export async function runTopicDeepResearch(topicId) {
+  return apiFetch(`/api/v1/topics/${encodeURIComponent(topicId)}/deep-research`, {
+    method: 'POST',
   });
 }
 
@@ -751,6 +829,14 @@ export async function importYouTubeUrl(url) {
   return apiFetch('/api/v1/ingest/youtube', {
     method: 'POST',
     body: JSON.stringify({ url }),
+  });
+}
+
+export async function inspectYouTubeResearchUrl(url) {
+  return apiFetch('/api/v1/research/youtube/inspect', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+    throwOnError: true,
   });
 }
 
@@ -1176,19 +1262,91 @@ export async function fetchWeeklyDigest() {
 }
 
 /**
- * Send a chat message to the AI chat endpoint.
+ * Chat with the eXplore AI backend (Gemini and/or xAI Grok).
  * Uses apiFetch so the Supabase Bearer token is attached automatically,
  * allowing the backend to identify the signed-in user for track_topic /
  * avoid_topic workspace mutations.
  *
  * @param {Array<{role: string, content: string}>} messages
  * @param {string} context
- * @returns {Promise<{reply: string, action?: string, query?: string, fallback?: boolean} | null>}
+ * @param {object} [options]
+ * @param {'solo'|'multi'} [options.mode]
+ * @param {number} [options.agentCount]
+ * @param {string} [options.modelPreference] - UI preference / persona id
+ * @param {string|null} [options.model] - concrete model id (grok-4, gemini-2.0-flash, …)
+ * @param {string|null} [options.accountId] - xAI pool account id
+ * @param {string|null} [options.projectId]
+ * @param {string|null} [options.conversationId]
+ * @returns {Promise<{reply: string, action?: string, query?: string, fallback?: boolean, phases?: Array, model?: string, modelPreference?: string} | null>}
  */
-export async function postChat(messages, context = 'general') {
+export async function postChat(messages, context = 'general', options = {}) {
+  const {
+    mode = 'solo',
+    agentCount = 1,
+    modelPreference = 'gemini',
+    model = null,
+    accountId = null,
+    projectId = null,
+    conversationId = null,
+  } = options || {};
+
   return apiFetch('/api/v1/chat', {
     method: 'POST',
-    body: JSON.stringify({ messages, context }),
+    body: JSON.stringify({
+      messages,
+      context,
+      mode,
+      agentCount,
+      modelPreference,
+      model: model || modelPreference,
+      accountId,
+      projectId,
+      conversationId,
+    }),
+    retryAcrossBases: true,
+    throwOnError: true,
+  });
+}
+
+/** Lightweight readiness probe used by the chat panel connection banner. */
+export async function probeApiHealth() {
+  return apiFetch('/api/v1/health', {
+    method: 'GET',
+    retryAcrossBases: true,
+    throwOnError: true,
+  });
+}
+
+/**
+ * AI account + model catalog for pickers.
+ * @param {{ live?: boolean, accountId?: string|null }} [options]
+ *   live=true asks xAI for the live model list on the active/selected account.
+ */
+export async function fetchAiCatalog(options = {}) {
+  const live = options.live ? '1' : '0';
+  const accountId = options.accountId ? `&accountId=${encodeURIComponent(options.accountId)}` : '';
+  return apiFetch(`/api/v1/ai/catalog?live=${live}${accountId}`, {
+    method: 'GET',
+    retryAcrossBases: true,
+    throwOnError: true,
+  });
+}
+
+/** Per-account xAI usage (requests, tokens, last error). */
+export async function fetchAiUsage(accountId = null) {
+  const qs = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
+  return apiFetch(`/api/v1/ai/usage${qs}`, {
+    method: 'GET',
+    retryAcrossBases: true,
+    throwOnError: true,
+  });
+}
+
+/** Persist the active xAI account id server-side for subsequent chat turns. */
+export async function setActiveAiAccount(accountId) {
+  return apiFetch('/api/v1/ai/accounts/active', {
+    method: 'POST',
+    body: JSON.stringify({ accountId }),
     retryAcrossBases: true,
     throwOnError: true,
   });

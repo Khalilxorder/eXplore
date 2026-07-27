@@ -1830,7 +1830,7 @@ export default function HomeScreen({
           }
           feedRetryTimerRef.current = window.setTimeout(() => {
             void loadSimpleNewsRef.current?.({
-              forceRefresh: true,
+              forceRefresh: Boolean(requestedUserId),
               refreshOrigin: 'retry',
               requestedMode,
               requestedUserId,
@@ -1938,7 +1938,7 @@ export default function HomeScreen({
     const refreshOrigin = initialRefreshScheduledRef.current ? 'mode' : 'initial';
     initialRefreshScheduledRef.current = true;
     void loadSimpleNews({
-      forceRefresh: true,
+      forceRefresh: Boolean(user?.id),
       refreshOrigin,
       requestedMode: mode,
       requestedUserId: user?.id || '',
@@ -1960,7 +1960,7 @@ export default function HomeScreen({
       if (applyEmergencySnapshot()) {
         setMessage('The page was still loading, so eXplore restored an emergency feed and is retrying live news.');
         void loadSimpleNews({
-          forceRefresh: true,
+          forceRefresh: Boolean(user?.id),
           refreshOrigin: 'retry',
           requestedMode: mode,
           requestedUserId: user?.id || '',
@@ -1975,7 +1975,7 @@ export default function HomeScreen({
   useEffect(() => {
     const handleRefresh = () => {
       void loadSimpleNews({
-        forceRefresh: true,
+        forceRefresh: Boolean(user?.id),
         refreshOrigin: 'external',
         requestedMode: mode,
         requestedUserId: user?.id || '',
@@ -1992,7 +1992,7 @@ export default function HomeScreen({
     const refreshIfVisible = () => {
       if (document.visibilityState === 'visible') {
         void loadSimpleNews({
-          forceRefresh: true,
+          forceRefresh: Boolean(user?.id),
           refreshOrigin: 'background',
           requestedMode: mode,
           requestedUserId: user?.id || '',
@@ -2049,7 +2049,7 @@ export default function HomeScreen({
 
     if (shouldRefresh) {
       void loadSimpleNews({
-        forceRefresh: true,
+        forceRefresh: Boolean(user?.id),
         refreshOrigin: 'pull',
         requestedMode: mode,
         requestedUserId: user?.id || '',

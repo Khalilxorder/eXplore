@@ -15,7 +15,7 @@ module.exports = async function topicRoutes(fastify, opts) {
     // Ensure the high-priority Jordan × Iran monitoring topic exists (plan Part 9).
     try {
       topicService.ensureJordanIranTopic(db, userId);
-    } catch (_) {
+    } catch {
       // Non-fatal: catalog/source tables may be mid-bootstrap.
     }
     return {
@@ -61,11 +61,61 @@ module.exports = async function topicRoutes(fastify, opts) {
   });
 
   fastify.post('/api/v1/topics/:id/discover-sources', async (request, reply) => {
-    const suggestions = topicService.suggestSources(db, resolveUserId(request), request.params.id);
-    if (!suggestions) {
+    const mode = String(request.body?.mode || 'ai').trim().toLowerCase();
+    const result = mode === 'catalog'
+      ? {
+          suggestions: topicService.suggestSources(
+            db,
+            resolveUserId(request),
+            request.params.id,
+          ),
+          generated_count: 0,
+          fallback_used: true,
+          error: '',
+        }
+      : await topicService.discoverSourcesWithAi(
+          db,
+          resolveUserId(request),
+          request.params.id,
+          request.body || {},
+        );
+    if (!result || !result.suggestions) {
       return reply.code(404).send({ success: false, error: 'Topic not found.' });
     }
-    return { success: true, suggestions };
+    return { success: true, ...result };
+  });
+
+  fastify.post('/api/v1/topics/:id/sources', async (request, reply) => {
+    try {
+      const source = topicService.addTopicSource(
+        db,
+        resolveUserId(request),
+        request.params.id,
+        request.body || {},
+      );
+      if (!source) {
+        return reply.code(404).send({ success: false, error: 'Topic not found.' });
+      }
+      return reply.code(201).send({ success: true, source });
+    } catch (error) {
+      return reply.code(400).send({
+        success: false,
+        error: error.message || 'Source could not be added.',
+      });
+    }
+  });
+
+  fastify.delete('/api/v1/topics/:id/sources/:sourceId', async (request, reply) => {
+    const removed = topicService.removeTopicSource(
+      db,
+      resolveUserId(request),
+      request.params.id,
+      request.params.sourceId,
+    );
+    if (!removed) {
+      return reply.code(404).send({ success: false, error: 'Topic source not found.' });
+    }
+    return { success: true };
   });
 
   fastify.put('/api/v1/topics/:id/sources/:sourceId', async (request, reply) => {
@@ -84,6 +134,54 @@ module.exports = async function topicRoutes(fastify, opts) {
       return reply.code(404).send({ success: false, error: 'Topic or source not found.' });
     }
     return { success: true, approved: source.status === 'approved', status: source.status, source };
+  });
+
+  fastify.get('/api/v1/topics/:id/events', async (request, reply) => {
+    const events = topicService.getTopicEvents(
+      db,
+      resolveUserId(request),
+      request.params.id,
+      {
+        limit: request.query?.limit,
+        ageHours: request.query?.ageHours || request.query?.age_hours,
+      },
+    );
+    if (!events) {
+      return reply.code(404).send({ success: false, error: 'Topic not found.' });
+    }
+    return {
+      success: true,
+      max_age_hours: 72,
+      events,
+    };
+  });
+
+  fastify.get('/api/v1/topics/:id/research', async (request, reply) => {
+    const topic = topicService.getTopic(db, resolveUserId(request), request.params.id);
+    if (!topic) {
+      return reply.code(404).send({ success: false, error: 'Topic not found.' });
+    }
+    return {
+      success: true,
+      runs: topicService.listResearchRuns(
+        db,
+        resolveUserId(request),
+        request.params.id,
+        request.query?.limit,
+      ),
+    };
+  });
+
+  fastify.post('/api/v1/topics/:id/deep-research', async (request, reply) => {
+    const run = await topicService.runDeepResearch(
+      db,
+      resolveUserId(request),
+      request.params.id,
+    );
+    if (!run) {
+      return reply.code(404).send({ success: false, error: 'Topic not found.' });
+    }
+    return reply.code(201).send({ success: true, run });
   });
 
   fastify.get('/api/v1/source-web', async (request, reply) => {

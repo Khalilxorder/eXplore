@@ -101,19 +101,37 @@ const cleanup = (code) => {
 process.on('SIGINT', () => cleanup(130));
 process.on('SIGTERM', () => cleanup(143));
 
+// Strip system proxy vars so localhost smoke-test requests are not routed
+// through a corporate or OS-level HTTP proxy on Windows.
+const childEnv = { ...process.env };
+for (const key of Object.keys(childEnv)) {
+  if (/^https?_proxy$/i.test(key)) {
+    delete childEnv[key];
+  }
+}
+childEnv.NO_PROXY = 'localhost,127.0.0.1,::1';
+childEnv.no_proxy = 'localhost,127.0.0.1,::1';
+
 for (const step of steps) {
   if (step.optionalIfMissing && !existsSync(step.optionalIfMissing)) {
     console.warn(`verify: skipping ${step.label} (missing ${step.optionalIfMissing})`);
     continue;
   }
-  const useShell = step.command === npmCmd && process.platform === 'win32';
-  const result = spawnSync(step.command, step.args, {
-    cwd: projectRoot,
-    env: process.env,
-    stdio: 'inherit',
-    shell: useShell,
-    windowsHide: true,
-  });
+  const result =
+    step.command === npmCmd && process.platform === 'win32'
+      ? spawnSync([npmCmd, ...step.args].join(' '), {
+          cwd: projectRoot,
+          env: childEnv,
+          stdio: 'inherit',
+          shell: true,
+          windowsHide: true,
+        })
+      : spawnSync(step.command, step.args, {
+          cwd: projectRoot,
+          env: childEnv,
+          stdio: 'inherit',
+          windowsHide: true,
+        });
   if (result.error) {
     console.error(`verify: failed to start ${step.label}: ${result.error.message}`);
     cleanup(1);

@@ -3,6 +3,7 @@ package com.explore.app;
 import android.os.Bundle;
 
 import com.explore.app.radar.RadarBridgePlugin;
+import com.explore.app.wolt.WoltBridgePlugin;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -10,5 +11,6 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         registerPlugin(RadarBridgePlugin.class);
+        registerPlugin(WoltBridgePlugin.class);
     }
 }

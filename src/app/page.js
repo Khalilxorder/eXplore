@@ -39,6 +39,7 @@ import PriorityRadarMonitor from './components/PriorityRadarMonitor';
 import PriorityRadarPhoneSetup from './components/PriorityRadarPhoneSetup';
 import ServiceWorkerRegistrar from './components/ServiceWorkerRegistrar';
 import AiChatPanel, { AiChatToggleButton } from './components/AiChatPanel';
+import YoutubeResearchGateModal from './components/YoutubeResearchGateModal';
 import {
   AUTH_REQUIRED_EVENT,
   fetchHistory,
@@ -1346,6 +1347,7 @@ function ExploreApp() {
               {screen === 'recommender-admin' && <RecommenderAdmin onBack={handleBack} />}
               {screen === 'auth-status' && <AuthStatusScreen onBack={handleBack} />}
             </AppShell>
+            <YoutubeResearchGateModal />
           </>
         ) : null}
       </div>

@@ -96,7 +96,11 @@ assertMarker(home, /applyEmergencySnapshot[\s\S]*?const snapshotItems = filterLa
 assertMarker(home, 'feedRequestFlightRef', 'Latest news refreshes must use a single in-flight request.');
 assertMarker(home, 'queuedFeedRequestRef', 'Latest news refreshes must coalesce one queued request.');
 assertMarker(home, 'latestFeedRequestIdRef', 'Latest news refreshes must reject stale request completions.');
-assertMarker(home, /refreshOrigin:\s*'pull'[\s\S]*?forceRefresh:\s*true|forceRefresh:\s*true[\s\S]*?refreshOrigin:\s*'pull'/, 'Pull-to-refresh must force the backend recalculation path.');
+assertMarker(
+  home,
+  /forceRefresh:\s*Boolean\(user\?\.id\)[\s\S]*?refreshOrigin:\s*'pull'|refreshOrigin:\s*'pull'[\s\S]*?forceRefresh:\s*Boolean\(user\?\.id\)/,
+  'Pull-to-refresh must force recalculation for signed-in users without sending guests through an authenticated endpoint.',
+);
 assertMarker(home, 'data-refresh-source={refreshIndicator.source', 'Refresh indicator must expose its current source.');
 assertMarker(home, 'data-refresh-status={refreshIndicator.status}', 'Refresh indicator must expose its current status.');
 const refreshButtons = (home.match(/<button\b[\s\S]*?<\/button>/g) || [])

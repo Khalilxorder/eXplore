@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeftIcon, HeartIcon, MoonIcon, SunIcon, TrashIcon, PlayIcon, SparklesIcon } from './Icons';
 import { useAuth } from './AuthProvider';
 import { createExperienceEntry, fetchHierarchyState } from '../lib/api';
+import { openYouTubeResearchGate } from '../lib/external';
 
 const HIDDEN_SONG_CATALOG = [
   {
@@ -263,20 +264,6 @@ async function fetchWeatherForPosition(position) {
   };
 }
 
-// Helper to convert watch URL to embed URL
-function toYoutubeEmbedUrl(url = '') {
-  try {
-    const parsed = new URL(url);
-    if (parsed.hostname.replace(/^www\./, '') === 'youtu.be') {
-      return `https://www.youtube.com/embed/${parsed.pathname.split('/').filter(Boolean)[0]}`;
-    }
-    const videoId = parsed.searchParams.get('v');
-    return videoId ? `https://www.youtube.com/embed/${videoId}` : '';
-  } catch {
-    return '';
-  }
-}
-
 export default function ExperienceScreen({ onBack }) {
   const { user } = useAuth();
   const audioRef = useRef(null);
@@ -456,7 +443,6 @@ export default function ExperienceScreen({ onBack }) {
     setPlaying(true);
   };
 
-  const embedUrl = match ? toYoutubeEmbedUrl(match.youtubeUrl) : '';
 
   return (
     <div 
@@ -528,28 +514,9 @@ export default function ExperienceScreen({ onBack }) {
               <strong>Personal connection:</strong> {match.reason}
             </p>
 
-            {/* Hidden Embedded YouTube Player of the Song */}
-            {embedUrl && (
-              <div 
-                className="youtube-embed-container" 
-                style={{ 
-                  width: '100%', 
-                  height: '240px', 
-                  borderRadius: 'var(--radius-md)', 
-                  overflow: 'hidden', 
-                  boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-                  border: '1px solid rgba(255,255,255,0.1)'
-                }}
-              >
-                <iframe
-                  src={`${embedUrl}?autoplay=1&enablejsapi=1`}
-                  title={match.title}
-                  style={{ width: '100%', height: '100%', border: '0' }}
-                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                  allowFullScreen
-                />
-              </div>
-            )}
+            <button type="button" className="btn btn-secondary" onClick={() => openYouTubeResearchGate({ url: match.youtubeUrl, title: match.title, summary: match.reason })}>
+              Review this match in the research gate
+            </button>
 
             <div style={{ display: 'flex', gap: '10px' }}>
               <button 

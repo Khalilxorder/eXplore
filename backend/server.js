@@ -14,6 +14,15 @@ const podcastService = require('./services/podcastService');
 const redditService = require('./services/redditService');
 const xService = require('./services/xService');
 const aiService = require('./services/aiService');
+const xaiProvider = require('./services/xaiProvider');
+const {
+  normalizeChatMode,
+  resolveXaiModelId,
+  resolveChatProviderRouting,
+  clampAgentCount,
+  isXaiConfigError,
+  XAI_NOT_CONFIGURED_MESSAGE,
+} = require('./services/chatModelRouting');
 const { scrapeInstagramPosts } = require('./src/services/scraperService');
 const templateService = require('./src/services/newsTemplateService');
 const templateRankingService = require('./src/services/templateRankingService');
@@ -38,6 +47,7 @@ const musicStatsRoutes = require('./src/routes/musicStats');
 const intelligenceRoutes = require('./src/routes/intelligence');
 const sharedExperienceRoutes = require('./src/routes/sharedExperience');
 const topicRoutes = require('./src/routes/topics');
+const woltRoutes = require('./src/routes/wolt');
 
 const {
   getPriorityAlerts,
@@ -158,6 +168,7 @@ const PROTECTED_ROUTE_PREFIXES = [
   '/api/v1/topics',
   '/api/v1/source-web',
   '/api/v1/admin',
+  '/api/v1/wolt',
   '/api/intelligence',
   '/api/events',
   '/api/v1/events',
@@ -173,6 +184,9 @@ const PUBLIC_EXACT_ROUTES = new Set([
   '/api/v1/meta/oauth/callback',
   '/api/v1/meta/webhook',
   '/api/v1/mail/callback',
+  // Wolt Foreground Service calls this from Android without a user session token.
+  // The actual Wolt courier bearer token stored in the DB gates real API calls.
+  '/api/v1/wolt/check',
 ]);
 const WRITTEN_BRIEF_CACHE_TTL_MS = 15 * 60 * 1000;
 const writtenNewsBriefCache = new Map();
@@ -335,6 +349,7 @@ fastify.register(experienceRoutes, { prefix: '/api/v1/experience', db });
 fastify.register(experimentRoutes, { prefix: '/api/v1/experiment', db });
 fastify.register(musicStatsRoutes, { prefix: '/api/v1/music', db });
 fastify.register(sharedExperienceRoutes, { prefix: '/api/v1/shared', db });
+fastify.register(woltRoutes, { prefix: '/api/v1/wolt', db });
 fastify.register(intelligenceRoutes, { db });
 fastify.register(topicRoutes, { db });
 
@@ -1607,11 +1622,27 @@ function buildFeedHealthPayload({ discoveryStatus, writtenCoverage, officialRele
   };
 }
 
-fastify.get('/api/v1/health', async (request) => {
+async function buildHealthPayload(request) {
   const readiness = buildSystemReadiness({
     db,
     dataBackend: DATA_BACKEND,
     user: request.user,
+  });
+  const xaiCatalog = xaiProvider.getCatalog();
+  const geminiPool = aiService.getSafeModelPoolDiagnostics();
+  const chatModels = [
+    ...(xaiCatalog?.models?.all || []).map((entry) => (typeof entry === 'string' ? entry : entry?.id)).filter(Boolean),
+    'gemini',
+    'grok_style',
+    'balanced',
+  ];
+  // Stable de-dupe while preserving order
+  const seenModels = new Set();
+  const models = chatModels.filter((id) => {
+    const key = String(id).toLowerCase();
+    if (seenModels.has(key)) return false;
+    seenModels.add(key);
+    return true;
   });
 
   return {
@@ -1622,8 +1653,36 @@ fastify.get('/api/v1/health', async (request) => {
     supabase_auth_configured: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY),
     push_configured: hasPushCredentials(),
     readiness: readiness.status,
+    chat: {
+      modes: ['solo', 'multi'],
+      models,
+      modelCatalog: {
+        xai: xaiCatalog?.models?.xai || xaiProvider.KNOWN_MODELS || [],
+        gemini: xaiCatalog?.models?.gemini || xaiProvider.GEMINI_MODELS || [],
+        personas: [
+          { id: 'gemini', label: 'Gemini (auto)', provider: 'gemini' },
+          { id: 'grok_style', label: 'Grok-style (Gemini/OpenAI)', provider: 'persona' },
+          { id: 'balanced', label: 'Balanced auto', provider: 'auto' },
+        ],
+      },
+      max_agents: 5,
+      max_context_messages: 48,
+      xai_configured: Boolean(xaiCatalog?.configured),
+      xai_account_count: Number(xaiCatalog?.accountCount || 0),
+      gemini_configured: Boolean(geminiPool?.keyCount || geminiPool?.openaiConfigured),
+      providers: {
+        xai: Boolean(xaiCatalog?.configured),
+        gemini: Boolean(geminiPool?.keyCount),
+        openai: Boolean(geminiPool?.openaiConfigured),
+      },
+    },
   };
-});
+}
+
+// Canonical health + short aliases used by mobile / probes that hit /health
+fastify.get('/api/v1/health', async (request) => buildHealthPayload(request));
+fastify.get('/health', async (request) => buildHealthPayload(request));
+fastify.get('/api/health', async (request) => buildHealthPayload(request));
 
 fastify.get('/api/v1/auth/capabilities', async (request) => ({
   authenticated: Boolean(request.user?.id),
@@ -1793,16 +1852,126 @@ fastify.get('/api/v1/sources/status', async (request) => {
 });
 
 fastify.get('/api/v1/ai/model-pool/status', async () => {
-  return aiService.getSafeModelPoolDiagnostics();
+  const gemini = aiService.getSafeModelPoolDiagnostics();
+  const xai = xaiProvider.getCatalog();
+  return {
+    ...gemini,
+    xai: {
+      configured: xai.configured,
+      accountCount: xai.accountCount,
+      activeAccountId: xai.activeAccountId,
+      activeAccountLabel: xai.activeAccountLabel,
+      accounts: xai.accounts,
+    },
+    providers: {
+      gemini: {
+        keyCount: gemini.keyCount || 0,
+        availableKeyCount: gemini.availableKeyCount ?? gemini.keyCount ?? 0,
+        degraded: Boolean(gemini.degraded),
+      },
+      xai: {
+        configured: xai.configured,
+        accountCount: xai.accountCount,
+        activeAccountId: xai.activeAccountId,
+      },
+    },
+  };
 });
 
 fastify.get('/api/v1/ai/model-pool/probe', async (request) => {
-  const provider = String(request.query?.provider || 'gemini').toLowerCase() === 'openai' ? 'openai' : 'gemini';
+  const provider = String(request.query?.provider || 'gemini').toLowerCase();
   const timeoutMs = Math.max(1500, Math.min(12000, Number(request.query?.timeoutMs || 8000)));
+  if (provider === 'xai' || provider === 'grok') {
+    const active = xaiProvider.resolveActiveAccount(request.query?.accountId || null);
+    if (!active) {
+      return { status: 'unavailable', provider: 'xai', error: 'No xAI accounts configured.' };
+    }
+    const probe = await xaiProvider.probeAccount(active);
+    return {
+      status: probe.ok ? 'live' : 'unavailable',
+      provider: 'xai',
+      accountId: probe.id,
+      accountLabel: probe.label,
+      models: probe.models,
+      latencyMs: probe.latencyMs,
+      error: probe.error || null,
+    };
+  }
+  const normalized = provider === 'openai' ? 'openai' : 'gemini';
   return aiService.probeLiveProvider({
-    providerPreference: provider,
+    providerPreference: normalized,
     timeoutMs,
   });
+});
+
+// AI catalog: accounts + models for simple UI pickers (keys always masked)
+fastify.get('/api/v1/ai/catalog', async (request) => {
+  xaiProvider.ensurePoolFileTemplate();
+  const live = ['1', 'true', 'yes', 'on'].includes(String(request.query?.live || '').toLowerCase());
+  const usage = await xaiProvider.getUsageSnapshot({
+    accountId: request.query?.accountId || null,
+    live,
+  });
+  const gemini = aiService.getSafeModelPoolDiagnostics();
+  const configured = Boolean(usage.configured);
+  return {
+    success: true,
+    provider: 'xai',
+    baseUrl: usage.baseUrl || xaiProvider.XAI_BASE_URL,
+    activeAccountId: usage.activeAccountId,
+    activeAccountLabel: usage.activeAccountLabel || null,
+    accounts: usage.accounts,
+    models: {
+      ...usage.models,
+      known: usage.knownModels || usage.models?.known || xaiProvider.KNOWN_MODELS,
+      liveXai: usage.liveModels || [],
+      geminiConfigured: Boolean(gemini.keyCount || gemini.openaiConfigured),
+    },
+    knownModels: usage.knownModels || xaiProvider.KNOWN_MODELS,
+    usage: usage.accounts,
+    probe: usage.probe || null,
+    note: configured
+      ? usage.note
+      : XAI_NOT_CONFIGURED_MESSAGE,
+    configured,
+    accountCount: usage.accountCount,
+    poolFile: xaiProvider.defaultPoolPath(),
+  };
+});
+
+fastify.get('/api/v1/ai/usage', async (request) => {
+  const usage = await xaiProvider.getUsageSnapshot({
+    accountId: request.query?.accountId || null,
+    live: false,
+  });
+  return {
+    success: true,
+    activeAccountId: usage.activeAccountId,
+    activeAccountLabel: usage.activeAccountLabel,
+    accounts: usage.accounts,
+    configured: Boolean(usage.configured),
+    accountCount: usage.accountCount,
+    note: usage.configured ? null : XAI_NOT_CONFIGURED_MESSAGE,
+  };
+});
+
+fastify.post('/api/v1/ai/accounts/active', async (request, reply) => {
+  const accountId = String(request.body?.accountId || request.body?.activeAccountId || '').trim();
+  if (!accountId) {
+    return reply.status(400).send({ success: false, error: 'accountId is required.' });
+  }
+  try {
+    const activeId = xaiProvider.setActiveAccountId(accountId);
+    const catalog = xaiProvider.getCatalog();
+    return {
+      success: true,
+      activeAccountId: activeId,
+      activeAccountLabel: catalog.activeAccountLabel,
+      accounts: catalog.accounts,
+    };
+  } catch (error) {
+    return reply.status(400).send({ success: false, error: error.message || String(error) });
+  }
 });
 
 fastify.get('/api/v1/news/brief', async (request, reply) => {
@@ -1911,6 +2080,37 @@ fastify.post('/api/v1/ingest/youtube', async (request, reply) => {
   } catch (error) {
     request.log.error(error, 'YouTube ingest failed');
     return reply.status(500).send({ error: 'YouTube ingest failed', details: error.message });
+  }
+});
+
+// Read-only research inspection. Unlike ingestion, this never writes a content item,
+// triggers AI analysis, or changes a user's feed.
+fastify.post('/api/v1/research/youtube/inspect', async (request, reply) => {
+  const { url } = request.body || {};
+  if (!url || typeof url !== 'string') {
+    return reply.status(400).send({ error: 'A valid YouTube URL is required.' });
+  }
+
+  try {
+    const video = await youtubeService.fetchVideoData(url.trim());
+    if (!video) {
+      return reply.status(404).send({ error: 'No YouTube video metadata was found for that URL.' });
+    }
+
+    return {
+      videoId: video.videoId,
+      title: video.title,
+      summary: video.description || '',
+      channelTitle: video.channelTitle || '',
+      thumbnailUrl: video.thumbnailUrl || '',
+      publishDate: video.publishDate || '',
+      durationSeconds: video.durationSeconds || 0,
+      transcriptStatus: video.transcriptStatus || 'unavailable',
+      transcriptPreview: String(video.transcriptPreview || video.transcript || '').slice(0, 1600),
+    };
+  } catch (error) {
+    request.log.warn(error, 'YouTube research inspection failed');
+    return reply.status(503).send({ error: 'YouTube research inspection is unavailable.', details: error.message });
   }
 });
 
@@ -2293,18 +2493,65 @@ function buildChatFallbackReply(intent = {}, newsContext = '', lastUserMessage =
     return buildArticleFallbackReply(article);
   }
 
-  const lines = [
-    'Watch confirmed events first: official AI releases, real access or pricing changes, regional escalation, market filings, and direct opportunities.',
-    'For AI advantage, start with OpenAI, Anthropic, Google/Gemini/DeepMind, xAI, Hugging Face, GitHub AI, Product Hunt-style tool launches, and developer pricing pages.',
-    'Use Direct only for alerts that change action now; use Important for high-signal app-visible events; use Watch for silent monitoring.',
+  const sections = [
+    '## Bottom line',
+    'Live model capacity is degraded right now, so this is a structured rule-based answer from eXplore (not a free-form model draft).',
+    '',
+    '## What to watch first',
+    '- Official AI releases, access/pricing changes, and real capability jumps',
+    '- Regional escalation and confirmed security events',
+    '- Market filings and direct opportunities',
+    '',
+    '## High-signal AI sources',
+    '- OpenAI, Anthropic, Google/Gemini/DeepMind, xAI',
+    '- Hugging Face, GitHub AI, first-party developer blogs',
+    '',
+    '## How eXplore ranks attention',
+    '- **Direct**: changes action now',
+    '- **Important**: high-signal app-visible events',
+    '- **Watch**: silent monitoring',
   ];
 
   if (newsContext) {
-    lines.push('Live AI is degraded, so this answer is rule-based from the current feed and configured source map.');
+    sections.push('', '## Live feed note', newsContext.trim());
   }
 
-  return lines.join(' ');
+  if (lastUserMessage) {
+    sections.push('', '## Your question', String(lastUserMessage).slice(0, 400));
+  }
+
+  return sections.join('\n');
 }
+
+function buildChatPersonaPrompt(modelPreference = 'gemini') {
+  if (modelPreference === 'grok_style') {
+    return `You write in a Grok-like style: maximally truthful, direct, a little witty when appropriate, never corporate fluff.
+Structure answers with clear visual hierarchy using Markdown:
+- Start with a one-line bottom-line answer
+- Then short sections with ## headings
+- Use bullet lists for parallel points
+- Bold key terms
+- Keep paragraphs short (2-4 lines)
+If something is uncertain, say so. Do not invent tool results.`;
+  }
+
+  if (modelPreference === 'balanced') {
+    return `Write with clear Markdown hierarchy (## headings, bullets, short paragraphs).
+Lead with the answer, then supporting detail. Be practical and precise.`;
+  }
+
+  return `Be concise, direct, and insightful. Use Markdown hierarchy:
+## Main answer
+supporting bullets, then optional detail. No filler.`;
+}
+
+const CHAT_AGENT_ROLES = [
+  { id: 'analyst', title: 'Analyst', focus: 'facts, evidence, and constraints' },
+  { id: 'strategist', title: 'Strategist', focus: 'options, tradeoffs, and next steps' },
+  { id: 'critic', title: 'Critic', focus: 'risks, counterarguments, and failure modes' },
+  { id: 'builder', title: 'Builder', focus: 'implementation steps and concrete artifacts' },
+  { id: 'synthesizer', title: 'Synthesizer', focus: 'merge prior agent notes into one coherent answer' },
+];
 
 // POST /chat — public AI chat endpoint with per-IP rate limiting
 fastify.post('/api/v1/chat', async (request, reply) => {
@@ -2313,10 +2560,52 @@ fastify.post('/api/v1/chat', async (request, reply) => {
     return;
   }
 
-  const { messages = [], context = 'general' } = request.body || {};
+  const {
+    messages = [],
+    context = 'general',
+    mode: rawMode = 'solo',
+    agentCount: rawAgentCount = 1,
+    modelPreference: rawModelPreference = 'gemini',
+    model: rawModel = null,
+    accountId: rawAccountId = null,
+    projectId = null,
+    conversationId = null,
+  } = request.body || {};
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return reply.status(400).send({ error: 'messages array is required.' });
+  }
+
+  const chatMode = normalizeChatMode(rawMode);
+  const agentCount = clampAgentCount(chatMode, rawAgentCount);
+  const xaiAccountId = rawAccountId ? String(rawAccountId).trim() : null;
+  const {
+    modelPreference,
+    useXai,
+    selectedModelId,
+    geminiModelId,
+  } = resolveChatProviderRouting({
+    model: rawModel,
+    modelPreference: rawModelPreference,
+  });
+
+  // Honest early failure when client asked for live Grok but no keys are configured.
+  // Do not return a fake "capacity degraded" fallback that looks like a model answer.
+  if (useXai) {
+    const xaiCatalog = xaiProvider.getCatalog();
+    if (!xaiCatalog?.configured || !Number(xaiCatalog.accountCount || 0)) {
+      return reply.status(503).send({
+        success: false,
+        error: XAI_NOT_CONFIGURED_MESSAGE,
+        provider: 'xai',
+        model: selectedModelId || resolveXaiModelId(modelPreference),
+        modelPreference,
+        configured: false,
+        accountCount: 0,
+        mode: chatMode,
+        agentCount,
+      });
+    }
   }
 
   // Build a news context snippet from the in-memory feed cache if available
@@ -2335,6 +2624,7 @@ fastify.post('/api/v1/chat', async (request, reply) => {
     // ignore — news context is best-effort
   }
 
+  const personaPrompt = buildChatPersonaPrompt(modelPreference);
   const systemPrompt = `You are the eXplore AI assistant — a smart, direct intelligence companion built into the eXplore app.
 
 eXplore is a personal AI news intelligence filter that surfaces only the highest-signal updates in AI releases, geopolitical developments, and topics the user cares about. It cuts through noise and delivers what actually matters.
@@ -2342,18 +2632,26 @@ eXplore is a personal AI news intelligence filter that surfaces only the highest
 You help users:
 - Navigate the features of eXplore (feed, priority radar, template, history, saved items)
 - Ask anything — you can discuss news, ideas, strategy, or answer general questions
+- Work in project-scoped conversations (project context id: ${projectId || 'none'})
 
-Be concise, direct, and insightful. No filler. If asked about the latest news, use the context below.${newsContext}`;
+${personaPrompt}
 
-  // Build messages array for the AI (last 12 messages max to keep context bounded)
-  const recentMessages = messages.slice(-12);
+If asked about the latest news, use the context below.${newsContext}`;
+
+  // Keep long conversations usable (mobile + desktop history). Bound tokens, not memory.
+  const recentMessages = messages.slice(-48);
   const conversationText = recentMessages
     .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${String(m.content || '').trim()}`)
     .join('\n');
   const generateChatStructuredJson = async (options = {}) => {
+    const requestOptions = {
+      ...options,
+      // Honor explicit gemini-* model picks; otherwise service default flash chain.
+      model: options.model || geminiModelId || undefined,
+    };
     try {
       return await aiService.generateStructuredJson({
-        ...options,
+        ...requestOptions,
         providerPreference: 'gemini',
         includeCoolingFallback: true,
       });
@@ -2363,10 +2661,20 @@ Be concise, direct, and insightful. No filler. If asked about the latest news, u
         'Gemini chat request failed, retrying with OpenAI'
       );
 
-      return aiService.generateStructuredJson({
-        ...options,
-        providerPreference: 'openai',
-      });
+      try {
+        return await aiService.generateStructuredJson({
+          ...requestOptions,
+          providerPreference: 'openai',
+          // Do not force a Gemini model id onto OpenAI.
+          model: undefined,
+        });
+      } catch (secondaryError) {
+        request.log.warn(
+          { error: secondaryError?.message || String(secondaryError || '') },
+          'OpenAI chat fallback unavailable'
+        );
+        throw primaryError;
+      }
     }
   };
   const lastUserMessage = recentMessages.slice().reverse().find((message) => message.role === 'user')?.content || '';
@@ -2448,11 +2756,13 @@ Be concise, direct, and insightful. No filler. If asked about the latest news, u
   };
 
   // --- Agentic Intent Router ---
+  // Live xAI chat should not depend on Gemini intent routing (keys/quota).
+  // Local heuristic intent still enables track/avoid/youtube actions.
   let fetchedContext = '';
   let intent = { ...fallbackIntent };
   try {
     const lastUserMessage = recentMessages.slice().reverse().find(m => m.role === 'user')?.content || '';
-    if (lastUserMessage) {
+    if (lastUserMessage && !useXai) {
       const intentPrompt = `Analyze the user's latest message and determine if they want to:
 1. "youtube_fetch": Fetch latest videos/summaries from a specific YouTube channel or topic. If so, provide "query" (e.g. channel name or topic).
 2. "track_topic": Add a new rule/topic/company to their eXplore platform to track in the background. If so, provide "query" (e.g. topic name).
@@ -2546,29 +2856,255 @@ Return JSON: { "action": "youtube_fetch" | "track_topic" | "avoid_topic" | "gene
 
   try {
     const finalSystemPrompt = `${systemPrompt}${fetchedContext}`;
-    const result = await generateChatStructuredJson({
-      temperature: 0.7,
-      systemPrompt: finalSystemPrompt,
-      userPrompt: `${conversationText}\n\nRespond as Assistant. Return JSON: { "reply": "string" }`,
-    });
+    const phases = [];
+    let reply_text = '';
+    // Mutable for multi-agent mid-workflow degrade (xAI step fails → Gemini remainder).
+    let activeUseXai = useXai;
+    let degradedFromXai = false;
+    let xaiStepsCompleted = 0;
+    let providerMeta = {
+      provider: useXai ? 'xai' : 'gemini',
+      model: useXai ? selectedModelId || resolveXaiModelId(modelPreference) : selectedModelId || 'gemini-auto',
+      accountId: null,
+      accountLabel: null,
+      usage: null,
+    };
 
-    const reply_text = String(result?.reply || result?.message || result?.response || result?.text || '').trim();
+    const runXaiText = async ({ roleLabel, extraSystem = '', temperature = 0.7 }) => {
+      const result = await xaiProvider.chatCompletion({
+        accountId: xaiAccountId,
+        model: providerMeta.model || selectedModelId || resolveXaiModelId(modelPreference),
+        temperature,
+        systemPrompt: `${finalSystemPrompt}${extraSystem ? `\n\n${extraSystem}` : ''}`,
+        messages: recentMessages.map((m) => ({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: String(m.content || ''),
+        })),
+      });
+      providerMeta = {
+        provider: 'xai',
+        model: result.model,
+        accountId: result.accountId,
+        accountLabel: result.accountLabel,
+        usage: result.usage || null,
+      };
+      xaiStepsCompleted += 1;
+      return result.text;
+    };
+
+    const runGeminiText = async ({ extraSystem = '', userPrompt, temperature = 0.65 }) => {
+      const result = await generateChatStructuredJson({
+        temperature,
+        systemPrompt: `${finalSystemPrompt}${extraSystem ? `\n\n${extraSystem}` : ''}`,
+        userPrompt,
+      });
+      const text = String(
+        result?.reply || result?.message || result?.response || result?.text || ''
+      ).trim();
+      if (providerMeta.provider !== 'xai' || degradedFromXai) {
+        providerMeta = {
+          ...providerMeta,
+          provider: 'gemini',
+          model: geminiModelId || providerMeta.model || 'gemini-auto',
+        };
+      }
+      return text;
+    };
+
+    /**
+     * Multi-agent + Grok must not abort the whole workflow if one xAI step fails.
+     * Config errors still propagate (honest 503). Other failures degrade remaining steps to Gemini.
+     */
+    const runAgentStep = async ({
+      roleLabel,
+      extraSystem = '',
+      userPrompt,
+      temperature = 0.65,
+    }) => {
+      if (activeUseXai) {
+        try {
+          return await runXaiText({ roleLabel, extraSystem, temperature });
+        } catch (error) {
+          if (isXaiConfigError(error)) throw error;
+          request.log.warn(
+            { error: error?.message || String(error || ''), roleLabel },
+            'xAI multi-agent step failed; degrading remaining steps to Gemini/OpenAI'
+          );
+          activeUseXai = false;
+          degradedFromXai = true;
+          providerMeta = {
+            provider: 'gemini',
+            model: geminiModelId || 'gemini-auto',
+            accountId: providerMeta.accountId,
+            accountLabel: providerMeta.accountLabel,
+            usage: providerMeta.usage,
+          };
+        }
+      }
+      return runGeminiText({ extraSystem, userPrompt, temperature });
+    };
+
+    if (chatMode === 'multi' && agentCount > 1) {
+      // N agents = (N-1) sequential specialists + 1 synthesizer (matches UI phase count).
+      const specialistSlotCount = Math.max(1, Math.min(CHAT_AGENT_ROLES.length - 1, agentCount - 1));
+      const activeRoles = CHAT_AGENT_ROLES
+        .filter((role) => role.id !== 'synthesizer')
+        .slice(0, specialistSlotCount);
+      const agentNotes = [];
+
+      for (let i = 0; i < activeRoles.length; i += 1) {
+        const role = activeRoles[i];
+        phases.push({
+          id: role.id,
+          label: `${role.title} (${i + 1}/${agentCount})${activeUseXai ? ' · xAI' : ''}`,
+          status: 'running',
+          focus: role.focus,
+        });
+
+        const note = await runAgentStep({
+          roleLabel: role.title,
+          extraSystem: `You are specialist agent "${role.title}". Focus only on ${role.focus}. Write concise Markdown notes, not a final essay.`,
+          userPrompt: `${conversationText}\n\nReturn JSON: { "reply": "markdown notes from ${role.title}" }`,
+          temperature: 0.55,
+        });
+
+        agentNotes.push({ role: role.title, note: note || `_(no note from ${role.title})_` });
+        phases[phases.length - 1].status = 'done';
+        if (degradedFromXai && !String(phases[phases.length - 1].label).includes('degraded')) {
+          phases[phases.length - 1].label = `${role.title} (${i + 1}/${agentCount}) · Gemini degrade`;
+        }
+      }
+
+      phases.push({
+        id: 'synthesizer',
+        label: `Synthesizer (${agentCount}/${agentCount})${activeUseXai ? ' · xAI' : degradedFromXai ? ' · Gemini' : ''}`,
+        status: 'running',
+        focus: 'merge agent notes into one final answer',
+      });
+
+      const synthesisPrompt = agentNotes
+        .map((entry, index) => `### Agent ${index + 1}: ${entry.role}\n${entry.note}`)
+        .join('\n\n');
+
+      reply_text = await runAgentStep({
+        roleLabel: 'Synthesizer',
+        extraSystem: `You are the lead synthesizer. Merge specialist notes into one coherent final answer with clear Markdown hierarchy. Resolve conflicts explicitly. Do not dump raw agent logs.\n\nSpecialist notes:\n${synthesisPrompt}`,
+        userPrompt: `${conversationText}\n\nSpecialist notes:\n${synthesisPrompt}\n\nReturn JSON: { "reply": "final markdown answer" }`,
+        temperature: 0.45,
+      });
+      phases[phases.length - 1].status = 'done';
+    } else {
+      phases.push({
+        id: 'solo',
+        label: activeUseXai ? `Grok · ${providerMeta.model}` : 'Thinking',
+        status: 'running',
+      });
+      if (activeUseXai) {
+        try {
+          reply_text = await runXaiText({
+            roleLabel: 'Solo',
+            temperature: 0.7,
+          });
+        } catch (error) {
+          // Solo xAI: config → 503 via outer catch; other errors → Gemini degrade then outer fallback.
+          if (isXaiConfigError(error)) throw error;
+          request.log.warn(
+            { error: error?.message || String(error || '') },
+            'Solo xAI failed; degrading to Gemini/OpenAI'
+          );
+          activeUseXai = false;
+          degradedFromXai = true;
+          reply_text = await runGeminiText({
+            userPrompt: `${conversationText}\n\nRespond as Assistant. Return JSON: { "reply": "markdown string with clear hierarchy" }`,
+            temperature: modelPreference === 'grok_style' ? 0.75 : 0.65,
+          });
+          phases[0].label = 'Gemini degrade (xAI failed)';
+        }
+      } else {
+        reply_text = await runGeminiText({
+          userPrompt: `${conversationText}\n\nRespond as Assistant. Return JSON: { "reply": "markdown string with clear hierarchy" }`,
+          temperature: modelPreference === 'grok_style' ? 0.75 : 0.65,
+        });
+      }
+      phases[0].status = 'done';
+    }
+
     if (!reply_text) {
       return reply.status(500).send({ error: 'AI returned an empty response.' });
+    }
+
+    let providerNote = 'Gemini-first with OpenAI fallback using server key pool.';
+    if (useXai && !degradedFromXai && providerMeta.provider === 'xai') {
+      providerNote = chatMode === 'multi' && agentCount > 1
+        ? `Live xAI Grok multi-agent (${agentCount} sequential calls, ${xaiStepsCompleted} completed) via account ${providerMeta.accountLabel || providerMeta.accountId || 'active'}.`
+        : `Live xAI Grok via account ${providerMeta.accountLabel || providerMeta.accountId || 'active'}.`;
+    } else if (degradedFromXai) {
+      providerNote = chatMode === 'multi' && agentCount > 1
+        ? `Started on live xAI multi-agent (${xaiStepsCompleted}/${agentCount} xAI steps), then degraded remaining steps to Gemini/OpenAI after an xAI error.`
+        : 'Live xAI failed mid-request; answer completed via Gemini/OpenAI degrade.';
+    } else if (modelPreference === 'grok_style') {
+      providerNote = 'Grok-style persona via Gemini/OpenAI pool (not live xAI). Pick a grok-* model for real xAI.';
     }
 
     return {
       reply: reply_text,
       action: String(intent?.action || 'general_chat'),
       query: String(intent?.query || ''),
+      mode: chatMode,
+      modelPreference,
+      model: providerMeta.model,
+      provider: providerMeta.provider,
+      accountId: providerMeta.accountId,
+      accountLabel: providerMeta.accountLabel,
+      usage: providerMeta.usage,
+      agentCount,
+      projectId: projectId || null,
+      conversationId: conversationId || null,
+      phases,
+      degradedFromXai: Boolean(degradedFromXai),
+      xaiStepsCompleted,
+      provider_note: providerNote,
     };
   } catch (error) {
     request.log.error(error, 'Chat completion failed');
+    const errorMessage = String(error?.message || error).slice(0, 240);
+
+    // Config / missing-key errors must not masquerade as a successful fallback reply.
+    if (useXai && isXaiConfigError(error)) {
+      return reply.status(503).send({
+        success: false,
+        error: XAI_NOT_CONFIGURED_MESSAGE,
+        provider: 'xai',
+        model: selectedModelId || modelPreference,
+        modelPreference,
+        configured: false,
+        mode: chatMode,
+        agentCount,
+      });
+    }
+
+    // Other xAI failures: clear error field + honest fallback body (HTTP 200 for mobile UX).
     return {
-      reply: buildChatFallbackReply(intent, newsContext, lastUserMessage),
+      reply: useXai
+        ? [
+          '## xAI request failed',
+          errorMessage || 'Live Grok call failed.',
+          '',
+          'Try another xAI account in the picker, pick a Gemini model, or retry shortly.',
+          '',
+          buildChatFallbackReply(intent, newsContext, lastUserMessage),
+        ].join('\n')
+        : buildChatFallbackReply(intent, newsContext, lastUserMessage),
       action: String(intent?.action || 'general_chat'),
       query: String(intent?.query || ''),
+      mode: chatMode,
+      modelPreference,
+      model: selectedModelId || modelPreference,
+      provider: useXai ? 'xai' : 'fallback',
+      agentCount,
       fallback: true,
+      phases: [{ id: 'fallback', label: 'Fallback answer', status: 'done' }],
+      error: errorMessage,
     };
   }
 });

@@ -8,7 +8,7 @@ import {
   fetchExperienceEntries,
   updateExperienceEntry,
 } from '../lib/api';
-import { openExternalUrl } from '../lib/external';
+import { openExternalUrl, openYouTubeResearchGate } from '../lib/external';
 
 const SHARED_EXPERIENCE_STORAGE_KEY = 'explore-shared-experience-state-v2';
 const SHARED_EXPERIENCE_KIND = 'shared-experience-state';
@@ -204,22 +204,6 @@ function makeId(prefix = 'item') {
     return `${prefix}-${crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${Math.round(Math.random() * 10000)}`;
-}
-
-function toYoutubeEmbedUrl(url = '') {
-  const rawUrl = String(url || '').trim();
-  if (!rawUrl) return '';
-
-  try {
-    const parsed = new URL(rawUrl);
-    const host = parsed.hostname.replace(/^www\./, '');
-    const videoId = host === 'youtu.be'
-      ? parsed.pathname.split('/').filter(Boolean)[0]
-      : parsed.searchParams.get('v');
-    return videoId ? `https://www.youtube.com/embed/${encodeURIComponent(videoId)}` : '';
-  } catch {
-    return '';
-  }
 }
 
 export default function SharedExperienceScreen({ onBack }) {
@@ -594,7 +578,6 @@ export default function SharedExperienceScreen({ onBack }) {
     });
   };
 
-  const embedUrl = toYoutubeEmbedUrl(activeSection?.videoUrl);
 
   return (
     <div className="page-enter shared-experience-shell">
@@ -789,21 +772,8 @@ export default function SharedExperienceScreen({ onBack }) {
                   style={{ width: '100%', padding: '8px', margin: '12px 0', borderRadius: '4px', border: '1px solid var(--border)', background: 'var(--surface)' }}
                 />
 
-                <div className="shared-video-frame" style={{ position: 'relative', width: '100%', height: '320px', background: '#000', borderRadius: '8px', overflow: 'hidden' }}>
-                  {embedUrl ? (
-                    <iframe
-                      src={embedUrl}
-                      title={activeSection.title}
-                      style={{ width: '100%', height: '100%', border: '0' }}
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                      allowFullScreen
-                    />
-                  ) : (
-                    <div className="shared-empty-video" style={{ display: 'flex', flexDirection: 'column', height: '100%', alignItems: 'center', justifyContent: 'center', color: '#666' }}>
-                      <PlayIcon size={40} />
-                      <span style={{ marginTop: '8px' }}>Add a video URL to embed.</span>
-                    </div>
-                  )}
+                <div className="shared-video-frame" style={{ minHeight: '160px', background: '#000', borderRadius: '8px', padding: '24px', display: 'grid', placeItems: 'center' }}>
+                  {activeSection.videoUrl ? <button type="button" className="btn btn-primary" onClick={() => openYouTubeResearchGate({ url: activeSection.videoUrl, title: activeSection.title })}><PlayIcon size={18} /> Review in research gate</button> : <div className="shared-empty-video" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: '#aaa' }}><PlayIcon size={40} /><span style={{ marginTop: '8px' }}>Add a YouTube URL to research.</span></div>}
                 </div>
 
                 <div className="shared-category-row" style={{ marginTop: '12px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>

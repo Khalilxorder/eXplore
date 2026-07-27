@@ -1287,6 +1287,11 @@ module.exports = async function intelligenceRoutes(fastify, opts) {
       const { Queue } = require('bullmq');
       const Redis = require('ioredis');
       connection = new Redis(REDIS_URL, { maxRetriesPerRequest: 0, connectTimeout: 1000, enableOfflineQueue: false });
+      // Suppress ioredis 'error' events from becoming unhandled EventEmitter
+      // errors. The try/catch on queue.add() + the timeout race already handle
+      // all failure paths; this listener just prevents Node from treating a
+      // refused connection as an uncaughtException.
+      connection.on('error', () => {});
       queue = new Queue('ingestionQueue', { connection });
       const queueAddPromise = queue.add('ingest', { url }, {
         attempts: 3,

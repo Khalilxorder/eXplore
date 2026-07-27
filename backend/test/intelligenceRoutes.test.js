@@ -545,7 +545,9 @@ test('Intelligence API Endpoints Verification', async (t) => {
 
       // The route intentionally schedules direct fallback work after the response.
       // Let that callback observe the stub before restoring the real adapter.
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Use 200ms to also allow any offline Redis connection error to settle
+      // so it does not surface as an unhandledRejection in the full suite run.
+      await new Promise((resolve) => setTimeout(resolve, 200));
       await adminApp.close();
     } finally {
       youtubeService.youtubeAdapter.process = originalProcess;

@@ -4,6 +4,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 const Database = require('better-sqlite3');
 const { ensureSqliteIdealState } = require('./src/db/sqliteBootstrap');
 const { refreshPriorityAlertCache } = require('./src/services/priorityAlertStore');
+const { runWoltDemandCheck } = require('./src/services/woltDemandService');
 const {
   alreadyDelivered,
   ALERT_WORKER_NAME,
@@ -27,6 +28,29 @@ function userWantsAlert(preferences, alert) {
 
 async function dispatchPriorityAlerts(options = {}) {
   const activeDb = options.db || db;
+
+  try {
+    const activeWoltConfigs = activeDb.prepare(`
+      SELECT wc.user_id, wc.check_interval_minutes,
+             MAX(ws.fetched_at) AS last_fetched
+      FROM wolt_monitor_configs wc
+      LEFT JOIN wolt_demand_snapshots ws ON ws.user_id = wc.user_id
+      WHERE wc.enabled = 1 AND wc.auth_token IS NOT NULL AND wc.auth_token != ''
+      GROUP BY wc.user_id
+    `).all();
+    for (const row of activeWoltConfigs) {
+      const intervalMs = (Number(row.check_interval_minutes) || 2) * 60 * 1000;
+      const lastFetchedMs = row.last_fetched ? new Date(row.last_fetched).getTime() : 0;
+      if (Date.now() - lastFetchedMs < intervalMs) {
+        continue; // Not time yet for this user
+      }
+      await runWoltDemandCheck(activeDb, row.user_id);
+    }
+  } catch (woltErr) {
+    // Log error silently without crashing the main push dispatch loop
+    console.error('Error during background Wolt demand check:', woltErr);
+  }
+
   const { alerts = [], checkedAt } = await refreshPriorityAlertCache(activeDb, { limit: 20 });
   const devices = activeDb.prepare(`
     SELECT id, user_id, token, platform, device_id, app_version

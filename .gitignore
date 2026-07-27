@@ -110,3 +110,20 @@ supabase/.temp/
 __pycache__/
 *.pyc
 
+# Local-only handoffs and credential-bearing archives
+Authorize.auz
+CODEX_FULL_CONVERSATION_HANDOFF.txt
+Rules for Visual Design.pdf
+codex_handoff.md
+docs/AGENT_FINISH_STATUS_2026-07-21.md
+docs/CHAT_PROJECTS_MOBILE_FIX_2026-07-21.md
+docs/CONSOLE_XAI_ACCOUNTS.md
+docs/FINISH_XAI_MULTI_ACCOUNT_2026-07-21.md
+docs/MOBILE_RELEASE_CHECKLIST.md
+docs/XAI_ACCOUNTS_AND_MODELS.md
+eXPLORE_Master_Prompt_Archive_2026-04-05.md
+prompts_history.md
+rules.txt
+scripts/add-xai-key.ps1
+seeded_links.md
+

@@ -23,11 +23,40 @@ function resolveSafeExternalUrl(url) {
   }
 }
 
+export function isYouTubeUrl(url) {
+  if (!url) return false;
+  try {
+    const baseUrl = typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : buildPublicUrl('/');
+    const parsed = new URL(url, baseUrl);
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    return host === 'youtube.com' || host === 'youtu.be' || host === 'youtube-nocookie.com' || host.endsWith('.youtube.com');
+  } catch {
+    return false;
+  }
+}
+
+export function openYouTubeResearchGate({ url, title = '', summary = '' } = {}) {
+  if (typeof window === 'undefined' || !isYouTubeUrl(url)) {
+    return false;
+  }
+
+  window.dispatchEvent(new CustomEvent('explore:open-youtube-gate', {
+    detail: { url, title, summary },
+  }));
+  return true;
+}
+
 export async function openExternalUrl(url) {
   const safeUrl = resolveSafeExternalUrl(url);
 
   if (!safeUrl) {
     return { ok: false, message: 'No source link is available for this item yet.' };
+  }
+
+  if (openYouTubeResearchGate({ url: safeUrl })) {
+    return { ok: true, message: 'Opened in eXplore YouTube Research Instrument.' };
   }
 
   if (Capacitor.isNativePlatform()) {

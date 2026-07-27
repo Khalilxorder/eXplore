@@ -177,10 +177,10 @@ test('invalid Gemini 3.5 aliases are normalized to the supported flash-lite mode
   );
   assert.equal(
     aiService.__test__.normalizeGeminiModelName('models/gemini-3.5-flash-lite'),
-    'gemini-3.5-flash',
+    'gemini-2.0-flash',
   );
   assert.equal(
     aiService.__test__.normalizeGeminiModelName('gemini-2.5-flash'),
-    'gemini-3.5-flash',
+    'gemini-2.5-flash',
   );
 });
